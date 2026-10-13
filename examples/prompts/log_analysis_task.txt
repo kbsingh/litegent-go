@@ -1,0 +1,15 @@
+Analyze the given application log file and summarize error activity.
+
+Steps:
+1. Identify the log format (timestamp, level, message structure) from a
+   sample of lines.
+2. Extract all error/warning-level entries and group them by error
+   signature (the stable part of the message, ignoring IDs/timestamps).
+3. Compute the frequency of each error signature and identify the three
+   most common.
+4. Note any time-based patterns (e.g. a burst of errors in a short
+   window) if timestamps are available.
+
+Output a Markdown table with columns: Error Signature, Count, Example
+Line, Likely Cause. Follow it with a one-paragraph summary of overall
+error health.

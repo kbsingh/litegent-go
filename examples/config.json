@@ -1,0 +1,34 @@
+{
+  "base_url": "https://api.openai.com/v1",
+  "api_key": "${OPENAI_API_KEY}",
+  "model": "gpt-4o",
+  "temperature": 0.0,
+  "max_tokens": 4096,
+  "timeout": 120.0,
+  "max_steps": 30,
+  "max_repeated_tool_calls": 3,
+  "manage_context": true,
+  "context_config": {
+    "max_context_tokens": 16000,
+    "max_tool_output_chars": 4000,
+    "window_size": 20,
+    "spool_dir": ".tmp/tool_outputs"
+  },
+  "log_dir": "./logs",
+  "log_level": "INFO",
+  "tools": {
+    "bash": {
+      "enabled": true,
+      "timeout": 60.0,
+      "default_workdir": "."
+    },
+    "file_ops": {
+      "enabled": true,
+      "max_read_lines": 2000
+    },
+    "search": {
+      "enabled": true,
+      "max_search_results": 100
+    }
+  }
+}

@@ -1,0 +1,16 @@
+Audit the given directory for exposed secrets and risky shell usage.
+
+Steps:
+1. Search for common secret patterns (API keys, AWS credentials, private
+   key headers, hardcoded passwords, bearer tokens) across all text
+   files, excluding typical binary/vendor/build directories.
+2. Search for shell commands that interpolate untrusted input directly
+   into a command string (a common injection risk), e.g. unsanitized
+   string concatenation into os/exec, subprocess, or shell calls.
+3. Check for world-writable files or improperly permissioned private key
+   files.
+
+For each finding, report: file path, line number, a one-line description
+of the risk, severity (critical/high/medium/low), and a concrete
+remediation suggestion. Do not print full secret values — truncate or
+redact them in your report.

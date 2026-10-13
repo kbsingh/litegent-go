@@ -1,0 +1,47 @@
+# Litegent configuration (YAML). JSON is also accepted (see config.json)
+# since valid JSON is valid YAML. Environment variable references of the
+# form ${VAR_NAME} or ${VAR_NAME:-default} are interpolated before
+# parsing, so secrets never need to live in cleartext on disk.
+#
+# NOTE: Litegent runs unconfined — see req/requirements_doc.md NFR-3.4.
+# None of the paths below (spool_dir, log_dir) are access boundaries;
+# they are just tidy defaults. The agent's tools can read, write, and
+# execute anywhere the invoking user's OS permissions allow.
+
+# --- LLM Endpoint & Credentials ---------------------------------------
+base_url: "https://api.openai.com/v1"
+api_key: "${OPENAI_API_KEY}"
+model: "gpt-4o"
+temperature: 0.0
+max_tokens: 4096
+timeout: 120.0          # per-request HTTP timeout, in seconds
+
+# --- Execution Safety Limits -------------------------------------------
+max_steps: 30                 # hard ceiling on agentic loop iterations
+max_repeated_tool_calls: 3    # inject a [LOOP DETECTED] notice after this many
+                               # consecutive identical (tool, args, result) triples
+
+# --- Context Management Engine -----------------------------------------
+manage_context: true
+context_config:
+  max_context_tokens: 16000      # trigger progressive summarization above this
+  max_tool_output_chars: 4000    # truncate (and spool) tool output above this
+  window_size: 20                # active turns kept before sliding-window pruning
+  spool_dir: ".tmp/tool_outputs"  # default landing spot for truncated output
+
+# --- Logging Destination & Verbosity -------------------------------------
+log_dir: "./logs"
+log_level: "INFO"
+
+# --- Built-in Tools Configuration ----------------------------------------
+tools:
+  bash:
+    enabled: true
+    timeout: 60.0          # per-command timeout, in seconds
+    default_workdir: "."   # default only — bash may still target any path
+  file_ops:
+    enabled: true
+    max_read_lines: 2000
+  search:
+    enabled: true
+    max_search_results: 100

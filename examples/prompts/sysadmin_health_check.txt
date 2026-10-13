@@ -1,0 +1,13 @@
+Perform a general health check of this machine and report the results.
+
+Check:
+1. CPU load and the top CPU-consuming processes.
+2. Memory usage, including available vs. used, and the top memory
+   consumers.
+3. Disk usage for all mounted filesystems, flagging anything above 85%
+   full.
+4. Any failed or crash-looping systemd services (systemctl --failed).
+
+Report a concise summary: overall health (OK / needs attention), the top
+3 resource consumers, and any specific concerns with a suggested next
+step for each.
