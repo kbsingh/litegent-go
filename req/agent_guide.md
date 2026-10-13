@@ -14,7 +14,7 @@ When contributing to, implementing, or extending Litegent, all developers (both 
 
 ### 1.1 Git Repository & Version Control Discipline
 
-1. **Repository Scope**: A Git repository must be initialized at `/home/rh-claude/src/litegent_son_py` to track all project code, configurations, tests, and documentation.
+1. **Repository Scope**: A Git repository must be initialized at `~/src/litegent-go` to track all project code, configurations, tests, and documentation.
 2. **Regular, Atomic Check-ins**:
    - Code must be committed regularly at the completion of each logical milestone or discrete sub-task (never batch multiple unrelated phases into a single unreviewed commit).
    - Before committing, inspect `git status` and `git diff` to ensure no unexpected temporary files, secrets, or logs are staged.
@@ -23,7 +23,7 @@ When contributing to, implementing, or extending Litegent, all developers (both 
    - `Coding-Agent`: The identifier of the coding agent performing the commit (e.g., `opencode`, `claude-code`).
    - `LLM`: The exact model ID powering the agent (e.g., `google/gemini-3.8-flash`, `claude-sonnet-5-5`).
    - `Host`: The machine hostname where the change is made.
-   - `Directory`: The absolute working directory path (e.g., `/home/rh-claude/src/litegent_son_py`).
+   - `Directory`: The absolute working directory path (e.g., `~/src/litegent-go`).
 
    **Standard Commit Message Format**:
    ```text
@@ -35,7 +35,7 @@ When contributing to, implementing, or extending Litegent, all developers (both 
    Coding-Agent: <agent identifier>
    LLM: <model id>
    Host: <hostname>
-   Directory: /home/rh-claude/src/litegent_son_py
+   Directory: ~/src/litegent-go
    ```
 
 ---

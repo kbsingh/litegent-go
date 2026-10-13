@@ -12,7 +12,7 @@
 The Litegent project deliverables comprise the Go module source code, configuration templates, role-based system prompts, task prompts, skill documentation, test suites, and project documentation.
 
 ```
-/home/rh-claude/src/litegent_son_py/
+~/src/litegent-go/
 ├── .gitignore
 ├── go.mod
 ├── go.sum
