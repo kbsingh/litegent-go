@@ -1,0 +1,17 @@
+# Build artifacts
+/litegent
+/bin/
+/dist/
+
+# Runtime output (not source)
+/logs/
+/.tmp/
+
+# Go tooling
+*.test
+*.out
+/vendor/
+
+# Editor/OS cruft
+.DS_Store
+*.swp

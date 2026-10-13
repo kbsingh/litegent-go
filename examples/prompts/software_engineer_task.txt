@@ -1,0 +1,12 @@
+Run the test suite for this project and fix any failing tests.
+
+Steps:
+1. Find the project's test command (look for a Makefile, go.mod, or CI
+   config if it isn't obvious) and run it.
+2. If any tests fail, read the failing test and the code it exercises to
+   understand the root cause.
+3. Make a minimal, targeted fix using edit_file.
+4. Re-run the tests to confirm they now pass, and run the full suite once
+   more to make sure you haven't broken anything else.
+5. Report which test(s) were failing, what the bug was, and what you
+   changed.
