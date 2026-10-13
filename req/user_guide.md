@@ -27,7 +27,7 @@ Litegent requires **zero external servers or MCP daemons**—all tools are built
 ### Installation
 Clone or navigate to the repository and build Litegent:
 ```bash
-cd /home/rh-claude/src/litegent_son_py
+cd ~/src/litegent-go
 go build -o litegent ./cmd/litegent
 ```
 Or install it onto your `$GOPATH/bin` (typically on `PATH`) in one step:
