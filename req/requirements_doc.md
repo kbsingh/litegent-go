@@ -110,6 +110,9 @@ Modern AI coding and operations agents often suffer from:
 - **FR-2.5: Repeated Tool-Call Loop Guard**  
   The loop must track recent `(tool_name, arguments, result)` triples. When the same triple recurs more than `max_repeated_tool_calls` consecutive times (default: `3`), Litegent must append a synthetic tool-result note (e.g. `[LOOP DETECTED] This exact call already produced this result. Try a different approach.`) instead of forwarding the repeated result silently, and record a `loop_guard_triggered` trace event.
 
+- **FR-2.6: Thinking/Reasoning Passthrough**  
+  The configuration must expose `thinking_level` (free text) and `thinking_format` (`"reasoning_effort"` default | `"thinking"`). When `thinking_level` is omitted, empty, or the reserved value `"default"`, no thinking parameter is sent and the model decides. Any other value must be forwarded to the LLM endpoint verbatim — no trimming, lowercasing, or translation — using exactly one wire shape: `{"reasoning_effort": "<level>"}` or `{"thinking": {"type": "<level>"}}`. The setting applies to every chat-completions request in the session, including context-summarization sub-calls. This is strictly opt-in passthrough: Litegent must not probe for endpoint support or automatically fall back; an endpoint that rejects the parameter surfaces its normal error. `thinking_format` is validated (and must be one of the two known values) only when a level is active.
+
 ---
 
 ### 4.3 Context Management Capabilities (`manage_context`)
@@ -229,6 +232,10 @@ Litegent shall provide native Go implementations of the following core tools:
 - **FR-7.4: Blank Input**  
   An empty line must simply re-prompt without starting a turn or contacting the LLM.
 
+- **FR-7.5: Turn Visibility (Separators & Tool-Call Notices)**  
+  - Every successful final response must be followed on stdout by the separator line `----====----`, in both single-shot and interactive mode, so turn boundaries are visually unambiguous. The separator is presentation only and must never be added to conversation history.
+  - In interactive sessions without `-v`, each tool invocation must emit exactly one compact stderr line of the form `|ToolCall : <first line of the tool request>` (tool name plus decoded arguments), produced by masking configured secrets first, then truncating to the first physical line, then clipping to 240 characters — so truncation can never defeat secret masking. The notice is suppressed under `-v`, where the richer per-tool progress line already reports the call.
+
 ---
 
 ### 4.8 Verbose Progress Reporting (`-v`)
@@ -237,7 +244,7 @@ Litegent shall provide native Go implementations of the following core tools:
   When `-v` is set, Litegent must stream concise, single-line progress updates to stderr as the loop runs — distinct from and in addition to the dual audit log (Section 4.6), which is written to disk for after-the-fact review.
   - Must report: session/turn startup (mode, model, endpoint, tool count), per-turn start, context pruning when the message count changes, per-step LLM request/response timing and tool-call count, per-tool-call arguments and per-result success/duration, turn completion, and session completion.
   - Configured secrets (e.g. the API key) must be masked in all progress output.
-  - When `-v` is not set, Litegent must produce no additional stderr output beyond fatal error messages.
+  - When `-v` is not set, stderr stays quiet apart from fatal error messages, the interactive `> ` prompt, and the interactive tool-call notice required by FR-7.5.
 
 ---
 

@@ -14,7 +14,7 @@ When contributing to, implementing, or extending Litegent, all developers (both 
 
 ### 1.1 Git Repository & Version Control Discipline
 
-1. **Repository Scope**: A Git repository must be initialized at `~/src/litegent-go` to track all project code, configurations, tests, and documentation.
+1. **Repository Scope**: A Git repository must be initialized at `/home/rh-claude/src/litegent_son_py` to track all project code, configurations, tests, and documentation.
 2. **Regular, Atomic Check-ins**:
    - Code must be committed regularly at the completion of each logical milestone or discrete sub-task (never batch multiple unrelated phases into a single unreviewed commit).
    - Before committing, inspect `git status` and `git diff` to ensure no unexpected temporary files, secrets, or logs are staged.
@@ -23,7 +23,7 @@ When contributing to, implementing, or extending Litegent, all developers (both 
    - `Coding-Agent`: The identifier of the coding agent performing the commit (e.g., `opencode`, `claude-code`).
    - `LLM`: The exact model ID powering the agent (e.g., `google/gemini-3.8-flash`, `claude-sonnet-5-5`).
    - `Host`: The machine hostname where the change is made.
-   - `Directory`: The absolute working directory path (e.g., `~/src/litegent-go`).
+   - `Directory`: The absolute working directory path (e.g., `/home/rh-claude/src/litegent_son_py`).
 
    **Standard Commit Message Format**:
    ```text
@@ -35,7 +35,7 @@ When contributing to, implementing, or extending Litegent, all developers (both 
    Coding-Agent: <agent identifier>
    LLM: <model id>
    Host: <hostname>
-   Directory: ~/src/litegent-go
+   Directory: /home/rh-claude/src/litegent_son_py
    ```
 
 ---
@@ -67,7 +67,7 @@ When contributing to, implementing, or extending Litegent, all developers (both 
 - **No Sandbox, No Path Jail**: Litegent is intentionally unconfined. The agent and its tools operate with the full filesystem and process privileges of the invoking user across the entire host — not just the working directory. `read_file`, `write_file`, `edit_file`, `glob_search`, `grep_search`, and `bash` must never reject, rewrite, or refuse a path for being "outside the project."
   - `spool_dir` and `log_dir` default to paths under the working directory (`.tmp/tool_outputs`, `./logs`) purely for tidy defaults — they are ordinary config values, not security boundaries, and are freely overridable to any path.
   - Because there is no sandbox, the dual audit log (Section 4) is the real safety control: every tool call and its exact arguments and output must be captured so any action taken anywhere on the host is fully reconstructable after the fact.
-- **No Cleartext Secrets**: Never commit or log API keys or bearer tokens. All API keys in runtime logs and progress output must be masked (e.g., `sk-...****`).
+- **No Cleartext Secrets**: Never commit or log API keys or bearer tokens. All API keys in runtime logs and progress output must be masked as `<first 3 chars>...<last 4 chars>`, preserving the key's own stub prefix (e.g., `sk-...1234`, `r9_...7890`); keys of 7 characters or fewer must be masked entirely (`****`), since a 3+4 character reveal would expose the whole key.
 - **Safe, Non-Interactive Subprocess Execution**:
   - All shell commands executed via the `bash` tool must run with an explicit `context.WithTimeout`-derived deadline and a short `cmd.WaitDelay`, to eliminate orphaned or runaway processes. Let `exec.CommandContext`'s default `cmd.Cancel` behavior (kill the process) stand rather than reassigning it to the same thing.
   - `cmd.Stdin` must be left at its zero value (`nil`, never inherited from the parent terminal) so it reads as immediate `EOF`, preventing hangs on commands that expect interactive input.

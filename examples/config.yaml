@@ -14,6 +14,17 @@ api_key: "${OPENAI_API_KEY}"
 model: "gpt-4o"
 temperature: 0.0
 max_tokens: 4096
+# Thinking/reasoning passthrough. thinking_level is free text forwarded to
+# the endpoint verbatim — use whatever your model accepts (e.g. "low" /
+# "medium" / "high", or "enabled" / "disabled"). The reserved value
+# "default" (or leaving the key out) sends nothing and lets the model
+# decide. thinking_format picks the wire shape and is only checked when a
+# level is set: "reasoning_effort" (default) sends
+# {"reasoning_effort": "<level>"}; "thinking" sends
+# {"thinking": {"type": "<level>"}}. Opt-in only: endpoints that reject
+# the parameter return their normal error.
+thinking_level: "default"
+thinking_format: "reasoning_effort"
 timeout: 120.0          # per-request HTTP timeout, in seconds
 
 # --- Execution Safety Limits -------------------------------------------
@@ -29,9 +40,8 @@ context_config:
   window_size: 20                # active turns kept before sliding-window pruning
   spool_dir: ".tmp/tool_outputs"  # default landing spot for truncated output
 
-# --- Logging Destination & Verbosity -------------------------------------
+# --- Logging Destination -------------------------------------------------
 log_dir: "./logs"
-log_level: "INFO"
 
 # --- Built-in Tools Configuration ----------------------------------------
 tools:

@@ -108,12 +108,19 @@ Validation order in `Run`: (1) parse flags, (2) handle `-h`/`--version` early-ex
 - A blank line (after trimming whitespace) re-prompts without starting a turn or contacting the LLM.
 - A line that trims to `/exit` or `/quit` (case-insensitive) ends the session cleanly.
 - Any other non-blank line becomes that turn's prompt, passed to `agent.Agent.RunInteractive` (2.8).
-- After each turn, the turn's `Result` is handled by an `onTurnResult` callback: `OutcomeSuccess` prints `FinalMessage` to stdout and continues; `OutcomeMaxStepsExceeded` reports to stderr and continues (the session is not terminated — history remains valid for the next turn); `OutcomeInterrupted` and `OutcomeLLMError` both print to stderr and end the session (return `false` from the callback).
+- After each turn, the turn's `Result` is handled by an `onTurnResult` callback: `OutcomeSuccess` prints `FinalMessage` to stdout, followed by the `----====----` turn separator, and continues; `OutcomeMaxStepsExceeded` reports to stderr and continues (the session is not terminated — history remains valid for the next turn); `OutcomeInterrupted` and `OutcomeLLMError` both print to stderr and end the session (return `false` from the callback).
 - The CLI-level exit code is `ExitInterrupted` for `OutcomeInterrupted`, `ExitLLMAPIError` for `OutcomeLLMError`, and `ExitSuccess` for everything else (including a session that ended after one or more turns hit `OutcomeMaxStepsExceeded`, since the session itself still ended cleanly via `/exit`/EOF).
 
 ##### 2.1.2 Progress Reporting (`-v`, `internal/progress`)
 
-`cliapp.Run` always constructs a `*progress.Reporter` (`progress.New(args.verbose, stderr, cfg.APIKey)`) and assigns it to `Agent.Progress` — whether or not `-v` was passed. `*progress.Reporter` is nil-receiver-safe and internally gated on `Enabled`, so every call site in `internal/agent` can call it unconditionally with no `if a.Progress != nil` guards, and it silently does nothing when `-v` is absent. See 2.8 for exactly which loop events it reports.
+`cliapp.Run` always constructs a `*progress.Reporter` (`progress.New(args.verbose, stderr, cfg.APIKey)`) and assigns it to `Agent.Progress` — whether or not `-v` was passed. `*progress.Reporter` is nil-receiver-safe and internally gated on `Enabled`, so every call site in `internal/agent` can call it unconditionally with no `if a.Progress != nil` guards, and it silently does nothing when `-v` is absent — with one deliberate exception: in interactive sessions the compact tool-call notice described next still prints without `-v`. See 2.8 for exactly which loop events it reports.
+
+For interactive sessions (`-i`), `cliapp.Run` additionally sets `Reporter.ShowToolCalls = true`: each tool invocation then emits one compact stderr line of the form `|ToolCall : <first line of the tool request>` (tool name plus decoded arguments) so the user can see tools working without `-v`. The line is built by masking configured secrets first, then truncating to the first physical line, then clipping to 240 characters — that order guarantees the clip can never defeat exact-key masking. The notice is suppressed when `Enabled` is true, since the verbose `[step n] tool ...` line already reports the call in more detail, and it is never emitted in single-shot mode — `ShowToolCalls` is set only when `-i` was passed. The resulting stderr visibility:
+
+| Mode | Without `-v` | With `-v` |
+|---|---|---|
+| Interactive (`-i`) | `> ` prompt + compact `\|ToolCall : ...` notices | Full progress stream (compact notice suppressed) |
+| Single-shot (`-p`) | Silent apart from fatal errors | Full progress stream |
 
 #### Exit Codes
 | Code | Constant | Meaning |
@@ -177,13 +184,14 @@ type LitegentConfig struct {
     Model                string        `yaml:"model" json:"model"`
     Temperature          float64       `yaml:"temperature" json:"temperature"`
     MaxTokens            int           `yaml:"max_tokens" json:"max_tokens"`
+    ThinkingLevel        string        `yaml:"thinking_level" json:"thinking_level"`
+    ThinkingFormat       string        `yaml:"thinking_format" json:"thinking_format"`
     Timeout              float64       `yaml:"timeout" json:"timeout"`
     MaxSteps             int           `yaml:"max_steps" json:"max_steps"`
     MaxRepeatedToolCalls int           `yaml:"max_repeated_tool_calls" json:"max_repeated_tool_calls"`
     ManageContext        bool          `yaml:"manage_context" json:"manage_context"`
     ContextConfig        ContextConfig `yaml:"context_config" json:"context_config"`
     LogDir               string        `yaml:"log_dir" json:"log_dir"`
-    LogLevel             string        `yaml:"log_level" json:"log_level"`
     Tools                ToolsConfig   `yaml:"tools" json:"tools"`
 }
 
@@ -197,6 +205,8 @@ func Default() LitegentConfig {
         Model:                "gpt-4o",
         Temperature:          0.0,
         MaxTokens:            4096,
+        ThinkingLevel:        "default",
+        ThinkingFormat:       ThinkingFormatReasoningEffort,
         Timeout:              120.0,
         MaxSteps:             30,
         MaxRepeatedToolCalls: 3,
@@ -207,8 +217,7 @@ func Default() LitegentConfig {
             WindowSize:         20,
             SpoolDir:           ".tmp/tool_outputs",
         },
-        LogDir:   "./logs",
-        LogLevel: "INFO",
+        LogDir: "./logs",
         Tools: ToolsConfig{
             Bash:    ToolBashConfig{Enabled: true, Timeout: 60.0, DefaultWorkdir: "."},
             FileOps: ToolFileOpsConfig{Enabled: true, MaxReadLines: 2000},
@@ -218,7 +227,7 @@ func Default() LitegentConfig {
 }
 ```
 
-`Validate() error` rejects an empty `BaseURL` or `Model`, a non-positive `MaxSteps`, a negative `MaxRepeatedToolCalls`, and — only when `ManageContext` is true — a non-positive `MaxContextTokens` or `MaxToolOutputChars` or `WindowSize`. A `(LitegentConfig) MaskedAPIKey() string` helper renders `sk-...<last 4 chars>` (or `****` for keys of 4 chars or fewer); callers use it anywhere a key must be shown without leaking it.
+`Validate() error` rejects an empty `BaseURL` or `Model`, a non-positive `MaxSteps`, a negative `MaxRepeatedToolCalls`, and — only when `ManageContext` is true — a non-positive `MaxContextTokens` or `MaxToolOutputChars` or `WindowSize`. It also rejects, but only when thinking is active, a `ThinkingFormat` other than `"reasoning_effort"` or `"thinking"` (an empty format means the `"reasoning_effort"` default). The level itself is never validated: `ThinkingLevel` is free text passed through verbatim, and `(LitegentConfig) ThinkingActive() bool` reports whether it carries an explicit non-`"default"` value that must be sent. A `(LitegentConfig) MaskedAPIKey() string` helper renders `<first 3 chars>...<last 4 chars>`, preserving the key's own stub prefix (e.g. `sk-...wxyz`, `r9_...wxyz`); keys of 7 characters or fewer are masked entirely (`****`), since a 3+4 character reveal would expose the whole key. Callers use it anywhere a key must be shown without leaking it.
 
 #### Environment Variable Interpolation
 Configuration files can include strings matching `${ENV_VAR}` or `${ENV_VAR:-default}`. `Load` performs regex substitution on the raw file bytes, then unmarshals the result:
@@ -284,7 +293,12 @@ type Message struct {
   "max_tokens": 4096
 }
 ```
-`tools`/`tool_choice` are only included when the registry has at least one tool registered.
+`tools`/`tool_choice` are only included when the registry has at least one tool registered. When thinking is active, the request additionally carries **exactly one** of these two mutually exclusive fields — never both:
+```json
+"reasoning_effort": "high"
+"thinking": { "type": "enabled" }
+```
+The two are the thinking/reasoning wire shapes, selected by `thinking_format` (`"reasoning_effort"` default | `"thinking"`), and neither is sent when `thinking_level` is omitted, empty, or `"default"`. The level value is free text forwarded verbatim (no trimming, lowercasing, or translation); `NewClient` only copies it onto the `Client` when `config.LitegentConfig.ThinkingActive()` is true, so every `ChatCompletion` call — including `Summarize` sub-calls — carries it once it is active. This is opt-in passthrough, not provider compatibility: each shape is sent exactly as configured, and an endpoint that does not support it returns its normal error (Litegent does not probe or auto-fallback).
 
 #### Error Handling & Retries
 - `ChatCompletion(ctx, messages, tools)` retries on HTTP `429`, `500`, `502`, `503`, `504` and on any network-level transport error from `http.Client.Do` (timeouts, connection refused, DNS failures, etc.) — up to `Client.MaxRetries` additional attempts (default `3`, so 4 attempts total).
@@ -566,7 +580,7 @@ Because Litegent runs unconfined with no sandbox (Section 4), this log is the sy
 - `os.MkdirAll(logDir, 0o755)`.
 - Timestamp tag `ts := time.Now().UTC().Format("20060102_150405")`.
 - Opens `trace_{ts}.jsonl` and `session_{ts}.log` with `O_APPEND|O_CREATE|O_WRONLY`, exposed as `Logger.TracePath`/`Logger.SessionPath`.
-- `apiKey`, if non-empty, is redacted (replaced with `sk-...<last 4 chars>`, or `****` if 4 chars or fewer) out of every string value written to either file — not just in a dedicated "api_key" field, but anywhere the literal key text would otherwise appear (e.g. inside an error message).
+- `apiKey`, if non-empty, is redacted out of every string value written to either file — not just in a dedicated "api_key" field, but anywhere the literal key text would otherwise appear (e.g. inside an error message). The mask preserves the key's own stub prefix (`<first 3 chars>...<last 4 chars>`, e.g. `sk-...1234`, `r9_...1234`); keys of 7 characters or fewer are masked entirely (`****`).
 
 #### JSONL Trace Events (`trace_{ts}.jsonl`)
 ```go
@@ -687,7 +701,7 @@ func (a *Agent) RunInteractive(
 
 `dispatchToolCall(ctx, step, call)`:
 1. Unmarshals `call.Function.Arguments` (a JSON string) into `map[string]any`; a malformed payload degrades to an empty args map rather than erroring.
-2. Logs + reports the tool call, then calls `Tools.Execute`.
+2. Logs + reports the tool call (the `Progress.ToolCall` report also emits the compact interactive `|ToolCall : ` notice when `ShowToolCalls` is set and `-v` is off), then calls `Tools.Execute`.
 3. Computes a `callSignature{name, argsJSON, resultJSON}` and compares it to `a.lastSignature`: equal → `a.repeatCount++`, otherwise reset to `1`; always updates `a.lastSignature`. If `Config.MaxRepeatedToolCalls > 0 && repeatCount > MaxRepeatedToolCalls`, the tool output is prefixed with a `[LOOP DETECTED] ...` notice and a `loop_guard_triggered` event is logged, **instead of** forwarding the raw repeated result.
 4. If `Config.ManageContext`, passes the (possibly loop-guard-annotated) output through `Context.TruncateToolOutput`, logging a `context_truncation` event if truncation actually occurred.
 5. Logs + reports the tool result (output truncated to 500 chars in the log/transcript summary, regardless of the context-management truncation above, which operates on what's sent back to the model).
@@ -739,7 +753,7 @@ cliapp.Run(argv, stdin, stdout, stderr) int
               result := ag.Run(ctx, systemPrompt, string(promptBytes))
               prog.SessionEnd(result.Outcome.String(), 1)
               switch result.Outcome:
-                Success            -> print result.FinalMessage to stdout, return 0
+                 Success            -> print result.FinalMessage to stdout, print the ----====---- turn separator, return 0
                 MaxStepsExceeded   -> print to stderr, return 2
                 Interrupted        -> print to stderr, return 130
                 LLMError (default) -> print to stderr, return 3
@@ -782,7 +796,7 @@ Litegent deliberately runs **unconfined**: there is no sandbox, chroot, containe
 4. **Interruptibility, Including Mid-Prompt**:
    - `internal/cliapp` derives its root context from `signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)`, so `SIGINT`/`SIGTERM` cancel it at any point.
    - In interactive mode, the blocking stdin read happens in a goroutine selected against that same context, so Ctrl+C still terminates the session (`ExitInterrupted`) even while waiting at the `> ` prompt, not just while a turn is actively running.
-5. **Secret Masking**:
-   - `LitegentConfig.APIKey` is masked as `sk-...<last 4 chars>` everywhere it could otherwise leak: the dual audit log (`internal/logging.Logger.redact`) and the live progress stream (`internal/progress.Reporter`) both scrub it out of any string before writing.
+ 5. **Secret Masking**:
+    - `LitegentConfig.APIKey` is masked everywhere it could otherwise leak: the dual audit log (`internal/logging.Logger.redact`), the config display helper (`LitegentConfig.MaskedAPIKey`), and the live progress stream (`internal/progress.Reporter.mask`) all scrub the literal key out of any string before writing. All three share one rule: preserve the key's own stub prefix (`<first 3 chars>...<last 4 chars>`, e.g. `sk-...1234`, `r9_...1234`) and mask keys of 7 characters or fewer entirely (`****`).
 6. **Clean Exit Handlers**:
    - `defer`-based cleanup on the log file handles (`Logger.Close`) and the signal context's `cancel` function ensure logs are flushed and closed even under `SIGINT`/`SIGTERM`.

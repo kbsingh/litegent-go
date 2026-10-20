@@ -23,6 +23,12 @@ type Reporter struct {
 	// reported text, mirroring the redaction internal/logging.Logger
 	// performs on the audit log.
 	Secrets []string
+	// ShowToolCalls emits a compact "|ToolCall : ..." notice line to
+	// Writer for every tool invocation, for interactive sessions that
+	// are not running verbose — under -v (Enabled) the richer
+	// "[step n] tool ..." line already covers it, so the notice is
+	// suppressed to avoid duplication.
+	ShowToolCalls bool
 }
 
 // New constructs a Reporter. Pass enabled=false (e.g. when -v is not
@@ -35,18 +41,26 @@ func (r *Reporter) write(format string, args ...any) {
 	if r == nil || !r.Enabled || r.Writer == nil {
 		return
 	}
-	line := fmt.Sprintf(format, args...)
+	fmt.Fprintln(r.Writer, r.mask(fmt.Sprintf(format, args...)))
+}
+
+// mask replaces every configured secret in s with a masked form that
+// preserves the secret's own stub prefix (e.g. "sk-...", "r9_..."),
+// mirroring the redaction internal/logging.Logger performs on the audit
+// log. Secrets of 7 characters or fewer are masked entirely, since
+// revealing a 3+4 character prefix/suffix would expose the whole secret.
+func (r *Reporter) mask(s string) string {
 	for _, secret := range r.Secrets {
 		if secret == "" {
 			continue
 		}
 		masked := "****"
-		if len(secret) > 4 {
+		if len(secret) > 7 {
 			masked = secret[:3] + "..." + secret[len(secret)-4:]
 		}
-		line = strings.ReplaceAll(line, secret, masked)
+		s = strings.ReplaceAll(s, secret, masked)
 	}
-	fmt.Fprintln(r.Writer, line)
+	return s
 }
 
 // Startup reports the session kind, model/endpoint, and tool count.
@@ -92,6 +106,14 @@ func (r *Reporter) Response(step int, started time.Time, toolCalls, tokens int) 
 // ToolCall reports a tool invocation, returning a start time for the
 // caller to pass to ToolResult for duration measurement.
 func (r *Reporter) ToolCall(step int, name string, args map[string]any) time.Time {
+	if r != nil && r.ShowToolCalls && !r.Enabled && r.Writer != nil {
+		// Compact interactive notice. Secrets are masked first (so the
+		// line/clip truncation below can never defeat exact-key
+		// replacement), then only the first physical line of the
+		// request is kept, then it is clipped for terminal width.
+		preview := clip(firstLine(r.mask(name+" "+fmt.Sprint(args))), 240)
+		fmt.Fprintln(r.Writer, "|ToolCall : "+preview)
+	}
 	r.write("[step %d] tool %s | args=%s", step, name, clip(fmt.Sprint(args), 240))
 	return time.Now()
 }
@@ -122,4 +144,14 @@ func clip(s string, limit int) string {
 		return s
 	}
 	return s[:limit-3] + "..."
+}
+
+// firstLine returns s truncated at its first newline, if any. Tool
+// arguments frequently embed multi-line content; only the opening line
+// is useful as a live one-line preview.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }

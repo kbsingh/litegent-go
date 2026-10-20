@@ -27,7 +27,7 @@ Litegent requires **zero external servers or MCP daemons**—all tools are built
 ### Installation
 Clone or navigate to the repository and build Litegent:
 ```bash
-cd ~/src/litegent-go
+cd /home/rh-claude/src/litegent_son_py
 go build -o litegent ./cmd/litegent
 ```
 Or install it onto your `$GOPATH/bin` (typically on `PATH`) in one step:
@@ -78,6 +78,10 @@ litegent -s <system_prompt_file> -i -c <config_file> [-k <skills_directory>] [-v
 | `-v` | `--verbose`| No | Stream live progress to stderr as the loop runs (see Section 5.5). |
 | `-h` | `--help` | No | Show help message and command syntax. |
 
+### Output
+
+On success, the agent's final response is printed to stdout followed by a `----====----` separator line — in single-shot and interactive mode alike. Tool-call notices (`|ToolCall : ...`) appear on stderr **only in interactive sessions** (Section 5.4); a single-shot run without `-v` stays silent on stderr apart from fatal errors. With `-v`, detailed per-step progress streams to stderr in both modes (Section 5.5).
+
 ---
 
 ## 4. Configuration Guide
@@ -92,6 +96,13 @@ api_key: "${OPENAI_API_KEY}"
 model: "gpt-4o"
 temperature: 0.0
 max_tokens: 4096
+# Thinking/reasoning control: free text forwarded verbatim to your
+# endpoint. "default" (or omitted) sends nothing. Use whatever your model
+# accepts, e.g. "low"/"medium"/"high" or "enabled"/"disabled".
+# thinking_format picks the wire shape when a level is set:
+# "reasoning_effort" (default) or "thinking" ({"thinking":{"type":...}}).
+thinking_level: "default"
+thinking_format: "reasoning_effort"
 timeout: 120.0
 
 # Execution Safety Limits
@@ -105,9 +116,8 @@ context_config:
   window_size: 20
   spool_dir: ".tmp/tool_outputs"
 
-# Logging Destination & Verbosity
+# Logging Destination
 log_dir: "./logs"
-log_level: "INFO"
 
 # Built-in Tools Configuration
 tools:
@@ -122,6 +132,11 @@ tools:
     enabled: true
     max_search_results: 100
 ```
+
+A few notes on the thinking settings:
+- An empty `thinking_level` behaves exactly like `"default"`: nothing is sent and the model decides.
+- An empty `thinking_format` means the `"reasoning_effort"` default; only a *misspelled* format is rejected, and only when a level is actually set.
+- Passthrough is opt-in — Litegent never probes your endpoint. If it does not support the parameter, the request fails with the endpoint's own error (exit code `3`), so remove the setting or set it back to `"default"` for such endpoints.
 
 ---
 
@@ -169,7 +184,12 @@ Pass `-i` instead of `-p` to start a persistent, multi-turn session instead of a
 litegent -s examples/roles/software_engineer.txt -i -c examples/config.yaml
 ```
 Litegent prints a `> ` prompt on stderr and reads one line at a time from stdin:
-- Each non-blank line starts a new turn; Litegent runs it to completion and prints the final response to stdout before prompting again.
+- Each non-blank line starts a new turn; Litegent runs it to completion and prints the final response to stdout, followed by a `----====----` separator line, before prompting again — so turn boundaries are always visually clear.
+- While a turn runs, every tool invocation prints a compact one-line notice to stderr so you can see the agent working:
+  ```text
+  |ToolCall : bash map[command:go test ./...]
+  ```
+  Only the first line of the tool request is shown (long arguments are clipped), and configured secrets are masked. Under `-v` these notices are suppressed in favor of the fuller per-tool progress lines (Section 5.5).
 - An empty line just re-prompts without starting a turn.
 - Type `/exit` or `/quit` (case-insensitive), or send EOF (Ctrl+D), to end the session cleanly.
 - `Ctrl+C` interrupts the session immediately, even while waiting at the prompt.
@@ -191,6 +211,13 @@ litegent: starting (interactive)
 [turn 1] ended | outcome=success steps=2
 ```
 Your configured API key (and any other configured secret) is masked out of every progress line.
+
+Tool-call visibility on stderr, by mode:
+
+| Mode | Without `-v` | With `-v` |
+|---|---|---|
+| Interactive (`-i`) | Compact `\|ToolCall : ...` notices (Section 5.4) | Full progress stream — compact notices are suppressed to avoid duplication |
+| Single-shot (`-p`) | Silent apart from fatal errors | Full progress stream |
 
 ---
 

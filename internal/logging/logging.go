@@ -95,14 +95,17 @@ func (l *Logger) Close() error {
 
 func nowUTC() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
-// redact masks any occurrence of the configured API key in s.
+// redact masks any occurrence of the configured API key in s. The mask
+// preserves the key's own stub prefix (e.g. "sk-...", "r9_..."); keys of
+// 7 characters or fewer are masked entirely, since revealing a 3+4
+// character prefix/suffix would expose the whole key.
 func (l *Logger) redact(s string) string {
 	if l.apiKey == "" || !strings.Contains(s, l.apiKey) {
 		return s
 	}
-	masked := "sk-...****"
-	if len(l.apiKey) > 4 {
-		masked = "sk-..." + l.apiKey[len(l.apiKey)-4:]
+	masked := "****"
+	if len(l.apiKey) > 7 {
+		masked = l.apiKey[:3] + "..." + l.apiKey[len(l.apiKey)-4:]
 	}
 	return strings.ReplaceAll(s, l.apiKey, masked)
 }

@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -140,6 +141,103 @@ func TestChatCompletion_SummaryRoleTranslatedForWire(t *testing.T) {
 		if r == RoleSummary {
 			t.Fatalf("RoleSummary must never be sent over the wire, got roles: %v", seenRoles)
 		}
+	}
+}
+
+// captureBody returns a handler that echoes one canned response and
+// records the raw request body for capturedRequest to assert on.
+func captureBody() (http.HandlerFunc, <-chan string) {
+	ch := make(chan string, 1)
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		ch <- string(body)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ChatResponse{Choices: []Choice{{Message: Message{Role: RoleAssistant, Content: "ok"}}}})
+	}, ch
+}
+
+// decodeRequest re-decodes a captured raw request body into ChatRequest.
+func decodeRequest(t *testing.T, raw string) ChatRequest {
+	t.Helper()
+	var req ChatRequest
+	if err := json.Unmarshal([]byte(raw), &req); err != nil {
+		t.Fatalf("unmarshaling captured request: %v", err)
+	}
+	return req
+}
+
+func TestChatCompletion_ThinkingDefaultSendsNothing(t *testing.T) {
+	handler, bodies := captureBody()
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	cfg := config.Default()
+	cfg.BaseURL = server.URL
+	cfg.APIKey = "test-key"
+	cfg.Model = "test-model"
+	c := NewClient(cfg)
+	if _, err := c.ChatCompletion(context.Background(), []Message{{Role: RoleUser, Content: "hi"}}, nil); err != nil {
+		t.Fatalf("ChatCompletion returned error: %v", err)
+	}
+
+	raw := <-bodies
+	if strings.Contains(raw, "reasoning_effort") {
+		t.Errorf("default thinking_level must not send reasoning_effort, got: %s", raw)
+	}
+	if strings.Contains(raw, "thinking") {
+		t.Errorf("default thinking_level must not send thinking, got: %s", raw)
+	}
+}
+
+func TestChatCompletion_ThinkingReasoningEffort(t *testing.T) {
+	handler, bodies := captureBody()
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	cfg := config.Default()
+	cfg.BaseURL = server.URL
+	cfg.APIKey = "test-key"
+	cfg.Model = "test-model"
+	cfg.ThinkingLevel = "High"
+	c := NewClient(cfg)
+	if c.ThinkingLevel != "High" {
+		t.Fatalf("active thinking_level not carried onto the client, got %q", c.ThinkingLevel)
+	}
+	if _, err := c.ChatCompletion(context.Background(), []Message{{Role: RoleUser, Content: "hi"}}, nil); err != nil {
+		t.Fatalf("ChatCompletion returned error: %v", err)
+	}
+
+	req := decodeRequest(t, <-bodies)
+	if req.ReasoningEffort != "High" {
+		t.Errorf("ReasoningEffort = %q, want \"High\" preserved verbatim", req.ReasoningEffort)
+	}
+	if req.Thinking != nil {
+		t.Errorf("thinking object must not be sent in reasoning_effort format, got: %+v", req.Thinking)
+	}
+}
+
+func TestChatCompletion_ThinkingObject(t *testing.T) {
+	handler, bodies := captureBody()
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	cfg := config.Default()
+	cfg.BaseURL = server.URL
+	cfg.APIKey = "test-key"
+	cfg.Model = "test-model"
+	cfg.ThinkingLevel = "enabled"
+	cfg.ThinkingFormat = config.ThinkingFormatThinking
+	c := NewClient(cfg)
+	if _, err := c.ChatCompletion(context.Background(), []Message{{Role: RoleUser, Content: "hi"}}, nil); err != nil {
+		t.Fatalf("ChatCompletion returned error: %v", err)
+	}
+
+	req := decodeRequest(t, <-bodies)
+	if req.Thinking == nil || req.Thinking.Type != "enabled" {
+		t.Errorf("Thinking = %+v, want {Type: \"enabled\"}", req.Thinking)
+	}
+	if req.ReasoningEffort != "" {
+		t.Errorf("reasoning_effort must not be sent in thinking format, got: %q", req.ReasoningEffort)
 	}
 }
 

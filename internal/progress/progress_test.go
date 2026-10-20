@@ -121,6 +121,125 @@ func TestReporter_MasksSecrets(t *testing.T) {
 	}
 }
 
+func TestReporter_MasksSecrets_R9Prefix(t *testing.T) {
+	var buf bytes.Buffer
+	r := New(true, &buf, "r9_supersecretvalue1234")
+	r.Startup("gpt-4o", "https://r9.example.com/v1?key=r9_supersecretvalue1234", 1, false)
+
+	out := buf.String()
+	if strings.Contains(out, "r9_supersecretvalue1234") {
+		t.Errorf("raw r9_ secret leaked into progress output: %q", out)
+	}
+	if !strings.Contains(out, "r9_...1234") {
+		t.Errorf("expected r9_ stub in masked secret, got: %q", out)
+	}
+}
+
+func TestReporter_MasksSecrets_ShortSecretFullyMasked(t *testing.T) {
+	var buf bytes.Buffer
+	r := New(true, &buf, "tinykey") // 7 chars: prefix+suffix reveal would expose it all
+	r.Startup("gpt-4o", "https://api.openai.com/v1?key=tinykey", 1, false)
+
+	out := buf.String()
+	if strings.Contains(out, "tinykey") {
+		t.Errorf("short secret leaked into progress output: %q", out)
+	}
+	if !strings.Contains(out, "****") {
+		t.Errorf("expected fully masked short secret, got: %q", out)
+	}
+}
+
+func TestReporter_ToolCallNotice(t *testing.T) {
+	var buf bytes.Buffer
+	r := New(false, &buf)
+	r.ShowToolCalls = true
+	r.ToolCall(0, "bash", map[string]any{"command": "echo hi"})
+
+	out := buf.String()
+	if !strings.HasPrefix(out, "|ToolCall : bash ") {
+		t.Errorf("unexpected notice prefix, got: %q", out)
+	}
+	if !strings.Contains(out, "echo hi") {
+		t.Errorf("notice missing tool request, got: %q", out)
+	}
+	if strings.Count(strings.TrimSuffix(out, "\n"), "\n") != 0 {
+		t.Errorf("notice must be a single line, got: %q", out)
+	}
+}
+
+func TestReporter_ToolCallNotice_FirstLineOnly(t *testing.T) {
+	var buf bytes.Buffer
+	r := New(false, &buf)
+	r.ShowToolCalls = true
+	r.ToolCall(0, "write_file", map[string]any{"content": "line1\nline2\nline3"})
+
+	out := buf.String()
+	if !strings.Contains(out, "line1") || strings.Contains(out, "line2") {
+		t.Errorf("notice must carry only the first line of the request, got: %q", out)
+	}
+	if strings.Count(strings.TrimSuffix(out, "\n"), "\n") != 0 {
+		t.Errorf("notice must be a single line, got: %q", out)
+	}
+}
+
+func TestReporter_ToolCallNotice_ClipsLongRequests(t *testing.T) {
+	var buf bytes.Buffer
+	r := New(false, &buf)
+	r.ShowToolCalls = true
+	r.ToolCall(0, "bash", map[string]any{"command": strings.Repeat("x", 300)})
+
+	out := strings.TrimSuffix(buf.String(), "\n")
+	if !strings.HasSuffix(out, "...") {
+		t.Errorf("clipped notice must end with ..., got: %q", out[len(out)-10:])
+	}
+	// "|ToolCall : " (12) + clip(request, 240) (240) for an over-limit request.
+	if len(out) != 12+240 {
+		t.Errorf("notice length = %d, want %d", len(out), 12+240)
+	}
+}
+
+func TestReporter_ToolCallNotice_SuppressedWhenVerbose(t *testing.T) {
+	var buf bytes.Buffer
+	r := New(true, &buf)
+	r.ShowToolCalls = true
+	r.ToolCall(0, "bash", map[string]any{"command": "echo hi"})
+
+	out := buf.String()
+	if strings.Contains(out, "|ToolCall :") {
+		t.Errorf("compact notice must be suppressed under -v, got: %q", out)
+	}
+	if !strings.Contains(out, "[step 0] tool bash") {
+		t.Errorf("verbose tool line missing, got: %q", out)
+	}
+}
+
+func TestReporter_ToolCallNotice_SuppressedWhenNotEnabled(t *testing.T) {
+	var buf bytes.Buffer
+	r := New(false, &buf) // ShowToolCalls defaults to false
+	r.ToolCall(0, "bash", map[string]any{"command": "echo hi"})
+	if buf.Len() != 0 {
+		t.Errorf("expected no output, got: %q", buf.String())
+	}
+}
+
+func TestReporter_ToolCallNotice_MasksSecretsBeforeClipping(t *testing.T) {
+	var buf bytes.Buffer
+	r := New(false, &buf, "r9_supersecretkey1234567890")
+	r.ShowToolCalls = true
+	// The secret sits ahead of the clip boundary; masking must happen
+	// before first-line extraction and clipping so it can never leak.
+	cmd := "echo r9_supersecretkey1234567890 && " + strings.Repeat("y", 300)
+	r.ToolCall(0, "bash", map[string]any{"command": cmd})
+
+	out := buf.String()
+	if strings.Contains(out, "r9_supersecretkey1234567890") {
+		t.Errorf("raw secret leaked into tool-call notice: %q", out)
+	}
+	if !strings.Contains(out, "r9_...7890") {
+		t.Errorf("expected masked secret in notice, got: %q", out)
+	}
+}
+
 func TestClip(t *testing.T) {
 	short := "hello"
 	if got := clip(short, 10); got != short {
