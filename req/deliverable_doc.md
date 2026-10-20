@@ -12,7 +12,7 @@
 The Litegent project deliverables comprise the Go module source code, configuration templates, role-based system prompts, task prompts, skill documentation, test suites, and project documentation.
 
 ```
-~/src/litegent-go/
+/home/rh-claude/src/litegent_son_py/
 ├── .gitignore
 ├── go.mod
 ├── go.sum
@@ -103,7 +103,7 @@ Note: Go tests are colocated as `_test.go` files alongside the package they test
 | `internal/ctxmgr/context.go` | Context management engine | Implements tool output truncation, disk spooling, sliding window, and summarization |
 | `internal/skills/skills.go` | Skill loader and prompt augmenter | Recursively scans `*.md` files and injects an `<available_skills>` catalog |
 | `internal/logging/logging.go` | Dual logging engine | Simultaneously generates append-only JSONL event trace and formatted human transcript |
-| `internal/progress/progress.go` | Live, human-facing progress reporter (`-v`) | Nil-receiver-safe `*Reporter`; streams startup/turn/request/tool-call/result/session lines to stderr with secrets masked; no-ops when disabled |
+| `internal/progress/progress.go` | Live, human-facing progress reporter (`-v`) | Nil-receiver-safe `*Reporter`; streams startup/turn/request/tool-call/result/session lines to stderr with secrets masked; no-ops when disabled; in interactive (`-i`) sessions without `-v` it still emits one compact `\|ToolCall : ...` notice line per tool invocation (single-shot never does) |
 | `internal/agent/agent.go` | Core agentic execution loop | `Run` (single-shot) and `RunInteractive` (persistent multi-turn) both share a `runTurn` implementation; orchestrates LLM queries, tool executions, context updates, the loop guard, and the stop condition |
 | `internal/tools/registry.go` | Tool registry and OpenAI schema exporter | Registers all built-in tools and aggregates their JSON schemas |
 | `internal/tools/bash.go` | Linux shell execution tool | Executes commands with context-based timeout and stream capture; non-zero exit does not crash the agent |

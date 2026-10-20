@@ -127,6 +127,39 @@ func TestAPIKeyRedaction(t *testing.T) {
 	}
 }
 
+func TestAPIKeyRedaction_R9Prefix(t *testing.T) {
+	l := newTestLogger(t, "r9_supersecretvalue1234")
+	l.LogSessionError(5, "auth failed for key r9_supersecretvalue1234")
+
+	events := readTraceEvents(t, l.TracePath)
+	errMsg := events[0].Data["error"].(string)
+	if strings.Contains(errMsg, "r9_supersecretvalue1234") {
+		t.Errorf("raw r9_ key leaked into trace log: %q", errMsg)
+	}
+	if !strings.Contains(errMsg, "r9_...1234") {
+		t.Errorf("expected r9_ stub in masked key, got: %q", errMsg)
+	}
+
+	session := readSession(t, l.SessionPath)
+	if strings.Contains(session, "r9_supersecretvalue1234") {
+		t.Errorf("raw r9_ key leaked into session log: %q", session)
+	}
+}
+
+func TestAPIKeyRedaction_ShortKeyFullyMasked(t *testing.T) {
+	l := newTestLogger(t, "tinykey") // 7 chars: prefix+suffix reveal would expose it all
+	l.LogSessionError(1, "key tinykey rejected")
+
+	events := readTraceEvents(t, l.TracePath)
+	errMsg := events[0].Data["error"].(string)
+	if strings.Contains(errMsg, "tinykey") {
+		t.Errorf("short key leaked into trace log: %q", errMsg)
+	}
+	if !strings.Contains(errMsg, "****") {
+		t.Errorf("expected fully masked short key, got: %q", errMsg)
+	}
+}
+
 func TestLogFinish(t *testing.T) {
 	l := newTestLogger(t, "")
 	l.LogFinish(10, "Task complete.", 10, 5000)

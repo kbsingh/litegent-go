@@ -30,6 +30,16 @@ type ToolSearchConfig struct {
 	MaxSearchResults int  `yaml:"max_search_results" json:"max_search_results"`
 }
 
+// Thinking wire formats selectable via thinking_format when
+// thinking_level is active. The level value itself is free text passed
+// through to the endpoint verbatim — different models accept different
+// values (e.g. "low"/"medium"/"high" for reasoning_effort,
+// "enabled"/"disabled" for thinking).
+const (
+	ThinkingFormatReasoningEffort = "reasoning_effort"
+	ThinkingFormatThinking        = "thinking"
+)
+
 // ToolsConfig aggregates per-tool configuration.
 type ToolsConfig struct {
 	Bash    ToolBashConfig    `yaml:"bash" json:"bash"`
@@ -52,13 +62,14 @@ type LitegentConfig struct {
 	Model                string        `yaml:"model" json:"model"`
 	Temperature          float64       `yaml:"temperature" json:"temperature"`
 	MaxTokens            int           `yaml:"max_tokens" json:"max_tokens"`
+	ThinkingLevel        string        `yaml:"thinking_level" json:"thinking_level"`
+	ThinkingFormat       string        `yaml:"thinking_format" json:"thinking_format"`
 	Timeout              float64       `yaml:"timeout" json:"timeout"`
 	MaxSteps             int           `yaml:"max_steps" json:"max_steps"`
 	MaxRepeatedToolCalls int           `yaml:"max_repeated_tool_calls" json:"max_repeated_tool_calls"`
 	ManageContext        bool          `yaml:"manage_context" json:"manage_context"`
 	ContextConfig        ContextConfig `yaml:"context_config" json:"context_config"`
 	LogDir               string        `yaml:"log_dir" json:"log_dir"`
-	LogLevel             string        `yaml:"log_level" json:"log_level"`
 	Tools                ToolsConfig   `yaml:"tools" json:"tools"`
 }
 
@@ -72,6 +83,8 @@ func Default() LitegentConfig {
 		Model:                "gpt-4o",
 		Temperature:          0.0,
 		MaxTokens:            4096,
+		ThinkingLevel:        "default",
+		ThinkingFormat:       ThinkingFormatReasoningEffort,
 		Timeout:              120.0,
 		MaxSteps:             30,
 		MaxRepeatedToolCalls: 3,
@@ -82,8 +95,7 @@ func Default() LitegentConfig {
 			WindowSize:         20,
 			SpoolDir:           ".tmp/tool_outputs",
 		},
-		LogDir:   "./logs",
-		LogLevel: "INFO",
+		LogDir: "./logs",
 		Tools: ToolsConfig{
 			Bash:    ToolBashConfig{Enabled: true, Timeout: 60.0, DefaultWorkdir: "."},
 			FileOps: ToolFileOpsConfig{Enabled: true, MaxReadLines: 2000},
@@ -161,15 +173,31 @@ func (c LitegentConfig) Validate() error {
 			return fmt.Errorf("context_config.window_size must be positive, got %d", c.ContextConfig.WindowSize)
 		}
 	}
+	if c.ThinkingActive() {
+		switch c.ThinkingFormat {
+		case "", ThinkingFormatReasoningEffort, ThinkingFormatThinking:
+		default:
+			return fmt.Errorf("thinking_format must be %q or %q when thinking_level is set, got %q",
+				ThinkingFormatReasoningEffort, ThinkingFormatThinking, c.ThinkingFormat)
+		}
+	}
 	return nil
 }
 
-// MaskedAPIKey returns the API key masked for safe display in logs, e.g.
-// "sk-...wxyz". Short or empty keys are masked entirely.
+// ThinkingActive reports whether thinking_level carries an explicit
+// value that must be passed through to the endpoint. "default" (and the
+// empty string) mean "send nothing and let the model decide".
+func (c LitegentConfig) ThinkingActive() bool {
+	return c.ThinkingLevel != "" && c.ThinkingLevel != "default"
+}
+
+// MaskedAPIKey returns the API key masked for safe display, preserving
+// the key's own stub prefix, e.g. "sk-...wxyz" or "r9_...wxyz". Keys of
+// 7 characters or fewer are masked entirely: revealing a 3-character
+// prefix and 4-character suffix would expose the whole key.
 func (c LitegentConfig) MaskedAPIKey() string {
-	const visible = 4
-	if len(c.APIKey) <= visible {
+	if len(c.APIKey) <= 7 {
 		return "****"
 	}
-	return "sk-..." + c.APIKey[len(c.APIKey)-visible:]
+	return c.APIKey[:3] + "..." + c.APIKey[len(c.APIKey)-4:]
 }

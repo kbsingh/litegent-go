@@ -40,6 +40,11 @@ const (
 	ExitInterrupted      = 130
 )
 
+// turnSeparator is printed to stdout after every successful final
+// response so turn boundaries are visually unambiguous in the
+// transcript. It is presentation only — never added to history.
+const turnSeparator = "----====----"
+
 const usage = `litegent - an autonomous, unconfined CLI AI agent for Linux
 
 Usage:
@@ -191,6 +196,7 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	ctxManager := ctxmgr.NewManager(cfg.ContextConfig, llmClient)
 	ag := agent.New(cfg, llmClient, registry, ctxManager, logger)
 	prog := progress.New(args.verbose, stderr, cfg.APIKey)
+	prog.ShowToolCalls = args.interactive
 	ag.Progress = prog
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -215,6 +221,7 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	switch result.Outcome {
 	case agent.OutcomeSuccess:
 		fmt.Fprintln(stdout, result.FinalMessage)
+		fmt.Fprintln(stdout, turnSeparator)
 		return ExitSuccess
 	case agent.OutcomeMaxStepsExceeded:
 		fmt.Fprintf(stderr, "litegent: max_steps (%d) exceeded without a final response\n", cfg.MaxSteps)
@@ -275,6 +282,7 @@ func runInteractive(ctx context.Context, ag *agent.Agent, systemPrompt string, c
 		switch result.Outcome {
 		case agent.OutcomeSuccess:
 			fmt.Fprintln(stdout, result.FinalMessage)
+			fmt.Fprintln(stdout, turnSeparator)
 			return true
 		case agent.OutcomeMaxStepsExceeded:
 			fmt.Fprintf(stderr, "litegent: turn %d: max_steps (%d) exceeded without a final response\n", turn, cfg.MaxSteps)

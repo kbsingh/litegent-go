@@ -74,12 +74,20 @@ func toWire(messages []Message) []Message {
 
 // ChatRequest is the request body sent to POST /chat/completions.
 type ChatRequest struct {
-	Model       string           `json:"model"`
-	Messages    []Message        `json:"messages"`
-	Tools       []map[string]any `json:"tools,omitempty"`
-	ToolChoice  string           `json:"tool_choice,omitempty"`
-	Temperature float64          `json:"temperature"`
-	MaxTokens   int              `json:"max_tokens,omitempty"`
+	Model           string           `json:"model"`
+	Messages        []Message        `json:"messages"`
+	Tools           []map[string]any `json:"tools,omitempty"`
+	ToolChoice      string           `json:"tool_choice,omitempty"`
+	Temperature     float64          `json:"temperature"`
+	MaxTokens       int              `json:"max_tokens,omitempty"`
+	ReasoningEffort string           `json:"reasoning_effort,omitempty"`
+	Thinking        *ThinkingConfig  `json:"thinking,omitempty"`
+}
+
+// ThinkingConfig is the request payload for the "thinking" wire format
+// (config thinking_format: "thinking"), e.g. {"type": "enabled"}.
+type ThinkingConfig struct {
+	Type string `json:"type"`
 }
 
 // Choice is a single completion choice in a ChatResponse.
@@ -123,13 +131,19 @@ type Client struct {
 	Model       string
 	Temperature float64
 	MaxTokens   int
-	HTTPClient  *http.Client
-	MaxRetries  int
+	// ThinkingLevel, when non-empty, is passed through to the endpoint
+	// verbatim via the wire shape selected by ThinkingFormat. NewClient
+	// only sets these when the config's thinking_level is active, so a
+	// zero-value Client (and "default"-level configs) send neither field.
+	ThinkingLevel  string
+	ThinkingFormat string
+	HTTPClient     *http.Client
+	MaxRetries     int
 }
 
 // NewClient builds a Client from the loaded Litegent configuration.
 func NewClient(cfg config.LitegentConfig) *Client {
-	return &Client{
+	c := &Client{
 		BaseURL:     strings.TrimRight(cfg.BaseURL, "/"),
 		APIKey:      cfg.APIKey,
 		Model:       cfg.Model,
@@ -138,6 +152,11 @@ func NewClient(cfg config.LitegentConfig) *Client {
 		HTTPClient:  &http.Client{Timeout: time.Duration(cfg.Timeout * float64(time.Second))},
 		MaxRetries:  3,
 	}
+	if cfg.ThinkingActive() {
+		c.ThinkingLevel = cfg.ThinkingLevel
+		c.ThinkingFormat = cfg.ThinkingFormat
+	}
+	return c
 }
 
 // retryableStatus reports whether an HTTP status code warrants a retry.
@@ -165,6 +184,15 @@ func (c *Client) ChatCompletion(ctx context.Context, messages []Message, tools [
 	if len(tools) > 0 {
 		reqBody.Tools = tools
 		reqBody.ToolChoice = "auto"
+	}
+	if c.ThinkingLevel != "" {
+		if c.ThinkingFormat == config.ThinkingFormatThinking {
+			reqBody.Thinking = &ThinkingConfig{Type: c.ThinkingLevel}
+		} else {
+			// reasoning_effort is the default wire format; an empty
+			// ThinkingFormat means the documented default.
+			reqBody.ReasoningEffort = c.ThinkingLevel
+		}
 	}
 	body, err := json.Marshal(reqBody)
 	if err != nil {

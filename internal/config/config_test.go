@@ -106,12 +106,110 @@ func TestLoad_InvalidYAML(t *testing.T) {
 	}
 }
 
+func TestLoad_ThinkingDefaults(t *testing.T) {
+	path := writeTemp(t, "config.yaml", `model: "gpt-4o"`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.ThinkingLevel != "default" {
+		t.Errorf("ThinkingLevel default = %q, want \"default\"", cfg.ThinkingLevel)
+	}
+	if cfg.ThinkingFormat != ThinkingFormatReasoningEffort {
+		t.Errorf("ThinkingFormat default = %q, want %q", cfg.ThinkingFormat, ThinkingFormatReasoningEffort)
+	}
+	if cfg.ThinkingActive() {
+		t.Error("default thinking_level must be inactive (send nothing)")
+	}
+}
+
+func TestLoad_ThinkingLevelFreeText(t *testing.T) {
+	path := writeTemp(t, "config.yaml", `
+thinking_level: "High Effort!"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("free-text thinking_level must load without validation, got: %v", err)
+	}
+	if cfg.ThinkingLevel != "High Effort!" {
+		t.Errorf("ThinkingLevel = %q, want it preserved verbatim", cfg.ThinkingLevel)
+	}
+	if !cfg.ThinkingActive() {
+		t.Error("explicit non-default thinking_level must be active")
+	}
+}
+
+func TestLoad_ThinkingExplicitDefaultInactive(t *testing.T) {
+	path := writeTemp(t, "config.yaml", `
+thinking_level: "default"
+thinking_format: "thinking"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.ThinkingActive() {
+		t.Error("explicit \"default\" thinking_level must be inactive (send nothing)")
+	}
+}
+
+func TestLoad_ThinkingFormatValid(t *testing.T) {
+	path := writeTemp(t, "config.yaml", `
+thinking_level: "high"
+thinking_format: "thinking"
+`)
+	if _, err := Load(path); err != nil {
+		t.Fatalf("thinking format \"thinking\" must validate, got: %v", err)
+	}
+}
+
+func TestLoad_ThinkingFormatInvalid(t *testing.T) {
+	path := writeTemp(t, "config.yaml", `
+thinking_level: "high"
+thinking_format: "bogus"
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected validation error for unknown thinking_format, got nil")
+	}
+}
+
+func TestLoad_ThinkingFormatNotValidatedWhenInactive(t *testing.T) {
+	path := writeTemp(t, "config.yaml", `
+thinking_level: "default"
+thinking_format: "bogus"
+`)
+	if _, err := Load(path); err != nil {
+		t.Fatalf("thinking_format must be ignored when the level is inactive, got: %v", err)
+	}
+}
+
 func TestMaskedAPIKey(t *testing.T) {
 	cfg := LitegentConfig{APIKey: "sk-abcdefgh1234wxyz"}
 	got := cfg.MaskedAPIKey()
 	want := "sk-...wxyz"
 	if got != want {
 		t.Errorf("MaskedAPIKey() = %q, want %q", got, want)
+	}
+}
+
+func TestMaskedAPIKey_R9Prefix(t *testing.T) {
+	cfg := LitegentConfig{APIKey: "r9_abcdefgh1234wxyz"}
+	got := cfg.MaskedAPIKey()
+	want := "r9_...wxyz"
+	if got != want {
+		t.Errorf("MaskedAPIKey() = %q, want %q", got, want)
+	}
+}
+
+func TestMaskedAPIKey_Boundary(t *testing.T) {
+	// 7 characters: a 3-char prefix plus 4-char suffix would reveal the
+	// entire key, so it must be fully masked. 8 is the shortest key that
+	// can safely show prefix and suffix.
+	if got := (LitegentConfig{APIKey: "1234567"}).MaskedAPIKey(); got != "****" {
+		t.Errorf("7-char key masked as %q, want ****", got)
+	}
+	if got := (LitegentConfig{APIKey: "12345678"}).MaskedAPIKey(); got != "123...5678" {
+		t.Errorf("8-char key masked as %q, want 123...5678", got)
 	}
 }
 

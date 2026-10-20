@@ -158,6 +158,9 @@ log_dir: "`+logDir+`"
 	if !strings.Contains(stdout.String(), "All done.") {
 		t.Errorf("expected final message on stdout, got: %q", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "All done.\n----====----\n") {
+		t.Errorf("expected turn separator after the final message, got: %q", stdout.String())
+	}
 
 	entries, err := os.ReadDir(logDir)
 	if err != nil {
@@ -278,6 +281,83 @@ log_dir: "`+logDir+`"
 	out := stdout.String()
 	if !strings.Contains(out, "reply to turn 1") || !strings.Contains(out, "reply to turn 2") {
 		t.Errorf("expected both turn replies on stdout, got: %q", out)
+	}
+	if n := strings.Count(out, "----====----"); n != 2 {
+		t.Errorf("expected one separator per printed reply (2), got %d", n)
+	}
+}
+
+func TestRun_InteractiveToolCallNotices(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req llm.ChatRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		hasToolResult := false
+		for _, m := range req.Messages {
+			if m.Role == llm.RoleTool {
+				hasToolResult = true
+			}
+		}
+		if !hasToolResult {
+			json.NewEncoder(w).Encode(llm.ChatResponse{
+				Choices: []llm.Choice{{
+					Message: llm.Message{
+						Role: llm.RoleAssistant,
+						ToolCalls: []llm.ToolCall{{
+							ID: "call_1", Type: "function",
+							Function: llm.FunctionCall{Name: "bash", Arguments: `{"command":"echo notice-check"}`},
+						}},
+					},
+					FinishReason: "tool_calls",
+				}},
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(llm.ChatResponse{
+			Choices: []llm.Choice{{Message: llm.Message{Role: llm.RoleAssistant, Content: "turn done"}, FinishReason: "stop"}},
+		})
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	systemPath := writeFile(t, dir, "system.txt", "you are an agent")
+	logDir := filepath.Join(dir, "logs")
+	cfgPath := writeFile(t, dir, "config.yaml", `
+base_url: "`+server.URL+`"
+model: "test-model"
+log_dir: "`+logDir+`"
+`)
+
+	run := func(verbose bool) (string, string) {
+		args := []string{"-s", systemPath, "-i", "-c", cfgPath}
+		if verbose {
+			args = append(args, "-v")
+		}
+		var stdout, stderr bytes.Buffer
+		code := Run(args, strings.NewReader("do it\n/exit\n"), &stdout, &stderr)
+		if code != ExitSuccess {
+			t.Fatalf("exit code = %d, stderr: %s", code, stderr.String())
+		}
+		return stdout.String(), stderr.String()
+	}
+
+	stdout, stderr := run(false)
+	if !strings.Contains(stderr, "|ToolCall : bash") || !strings.Contains(stderr, "notice-check") {
+		t.Errorf("expected compact tool-call notice on stderr, got: %q", stderr)
+	}
+	if !strings.Contains(stdout, "turn done\n----====----\n") {
+		t.Errorf("expected reply followed by turn separator, got: %q", stdout)
+	}
+
+	stdout, stderr = run(true)
+	if strings.Contains(stderr, "|ToolCall :") {
+		t.Errorf("compact notice must be suppressed under -v, got: %q", stderr)
+	}
+	if !strings.Contains(stderr, "[step 0] tool bash") {
+		t.Errorf("verbose tool line missing under -v, got: %q", stderr)
+	}
+	if !strings.Contains(stdout, "turn done\n----====----\n") {
+		t.Errorf("expected reply followed by turn separator under -v, got: %q", stdout)
 	}
 }
 
