@@ -4,8 +4,12 @@
 package config
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"regexp"
 
 	"gopkg.in/yaml.v3"
@@ -102,6 +106,64 @@ func Default() LitegentConfig {
 			Search:  ToolSearchConfig{Enabled: true, MaxSearchResults: 100},
 		},
 	}
+}
+
+// DefaultJSON renders the documented default configuration as indented
+// JSON suitable for writing to disk. The API key is replaced with an
+// environment placeholder so a generated file never embeds the caller's
+// real credential.
+func DefaultJSON() ([]byte, error) {
+	cfg := Default()
+	cfg.APIKey = "${OPENAI_API_KEY}"
+
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshaling default config: %w", err)
+	}
+	return append(data, '\n'), nil
+}
+
+// EnsureDefaultConfig creates path (and its parent directory) with the
+// documented example configuration when path does not already exist. It
+// returns created=true only when this call wrote the file; an existing
+// file is never overwritten. Creation uses O_EXCL so two concurrent
+// processes cannot clobber each other.
+func EnsureDefaultConfig(path string) (created bool, err error) {
+	if _, statErr := os.Stat(path); statErr == nil {
+		return false, nil
+	} else if !errors.Is(statErr, fs.ErrNotExist) {
+		return false, fmt.Errorf("checking config %q: %w", path, statErr)
+	}
+
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
+			return false, fmt.Errorf("creating config directory %q: %w", dir, mkErr)
+		}
+	}
+
+	data, err := DefaultJSON()
+	if err != nil {
+		return false, err
+	}
+
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return false, nil // another process created it first
+		}
+		return false, fmt.Errorf("creating default config %q: %w", path, err)
+	}
+
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(path)
+		return false, fmt.Errorf("writing default config %q: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(path)
+		return false, fmt.Errorf("closing default config %q: %w", path, err)
+	}
+	return true, nil
 }
 
 // envPattern matches ${VAR} and ${VAR:-default} references.

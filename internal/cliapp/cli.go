@@ -225,8 +225,9 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	// Resolve the config path: -c wins; otherwise use
-	// ~/.litegent/config.json. A missing default file is reported as a
-	// clear, actionable error rather than silently running with defaults.
+	// ~/.litegent/config.json, creating it with the documented example
+	// values on first use. The created file uses an ${OPENAI_API_KEY}
+	// placeholder, never a real key.
 	configPath := args.configPath
 	if configPath == "" {
 		path, pathErr := defaultConfigPath()
@@ -235,15 +236,13 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return ExitConfigOrCLIError
 		}
 		configPath = path
-		if _, statErr := os.Stat(configPath); errors.Is(statErr, fs.ErrNotExist) {
-			fmt.Fprintf(stderr,
-				"litegent: no config supplied and no default config found at %s; pass -c/--config or create the file\n",
-				configPath,
-			)
+		created, ensureErr := config.EnsureDefaultConfig(configPath)
+		if ensureErr != nil {
+			fmt.Fprintf(stderr, "litegent: preparing default config: %v\n", ensureErr)
 			return ExitConfigOrCLIError
-		} else if statErr != nil {
-			fmt.Fprintf(stderr, "litegent: checking default config %s: %v\n", configPath, statErr)
-			return ExitConfigOrCLIError
+		}
+		if created {
+			fmt.Fprintf(stderr, "litegent: created default config at %s\n", configPath)
 		}
 	}
 	cfg, err := config.Load(configPath)

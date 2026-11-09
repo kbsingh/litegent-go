@@ -61,8 +61,8 @@ Modern AI coding and operations agents often suffer from:
 
 - **FR-1.4: Configuration File (`-c, --config`)**  
   - Shall accept an optional path pointing to a valid configuration file formatted in either JSON or YAML.
-  - When the flag is omitted, Litegent must use `~/.litegent/config.json`.
-  - If the resolved file does not exist, cannot be read, has invalid syntax, or has missing/invalid required fields, Litegent must exit immediately with a descriptive error and exit code `1`.
+  - When the flag is omitted, Litegent must use `~/.litegent/config.json`. If that file does not exist, Litegent must create it (and its parent directory) with the documented example values, using `${OPENAI_API_KEY}` as the API-key placeholder, then proceed.
+  - If an explicitly supplied file does not exist, or the resolved file cannot be read, has invalid syntax, or has missing/invalid required fields, Litegent must exit immediately with a descriptive error and exit code `1`.
 
 - **FR-1.5: Skills Directory (`-k, --skills`)**  
   - Shall accept an optional path pointing to a directory containing skill documentation files.

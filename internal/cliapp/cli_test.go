@@ -98,19 +98,46 @@ func TestRun_DefaultConfigLocation(t *testing.T) {
 	}
 }
 
-func TestRun_DefaultConfigMissing(t *testing.T) {
+func TestRun_CreatesDefaultConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	promptPath := writeFile(t, home, "prompt.txt", "task")
+	t.Chdir(t.TempDir()) // keep the default "./logs" out of the repo tree
 
 	var stdout, stderr bytes.Buffer
-	code := Run([]string{"-p", promptPath}, strings.NewReader(""), &stdout, &stderr)
-	if code != ExitConfigOrCLIError {
-		t.Fatalf("exit code = %d, want %d", code, ExitConfigOrCLIError)
+	code := Run([]string{"-i"}, strings.NewReader(""), &stdout, &stderr)
+	if code != ExitSuccess {
+		t.Fatalf("exit code = %d, want %d, stderr: %s", code, ExitSuccess, stderr.String())
 	}
-	wantPath := filepath.Join(home, defaultDirName, defaultConfigFileName)
-	if !strings.Contains(stderr.String(), "no default config found") || !strings.Contains(stderr.String(), wantPath) {
-		t.Errorf("expected actionable default-config error mentioning %q, got: %q", wantPath, stderr.String())
+
+	path := filepath.Join(home, defaultDirName, defaultConfigFileName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("expected default config at %s: %v", path, err)
+	}
+	if !strings.Contains(string(data), `"${OPENAI_API_KEY}"`) {
+		t.Errorf("expected generated config to use an API-key placeholder, got: %s", data)
+	}
+	if !strings.Contains(stderr.String(), "created default config at "+path) {
+		t.Errorf("expected creation notice on stderr, got: %q", stderr.String())
+	}
+
+	// A second run must reuse the file rather than rewriting it.
+	before := string(data)
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"-i"}, strings.NewReader(""), &stdout, &stderr)
+	if code != ExitSuccess {
+		t.Fatalf("second run exit code = %d, want %d, stderr: %s", code, ExitSuccess, stderr.String())
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != before {
+		t.Error("existing default config was overwritten on the second run")
+	}
+	if strings.Contains(stderr.String(), "created default config") {
+		t.Errorf("second run must not report creating the config again, got: %q", stderr.String())
 	}
 }
 

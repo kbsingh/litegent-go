@@ -96,7 +96,7 @@ When `-c` is omitted, Litegent reads `~/.litegent/config.json`. When `-s` is omi
 └── system.md     # default system prompt (used when -s is omitted)
 ```
 
-If `-c` is omitted and `~/.litegent/config.json` does not exist, Litegent exits with an error naming that path so the fix is obvious.
+If `-c` is omitted and `~/.litegent/config.json` does not exist, Litegent creates it (and `~/.litegent/` itself) with the documented example values, then continues. The generated file uses `"${OPENAI_API_KEY}"` as its API-key placeholder, so no real credential is written, and an existing config is never overwritten. Litegent prints a one-line notice to stderr when it creates the file.
 
 ### Complete YAML Configuration Example (`config.yaml`)
 ```yaml
