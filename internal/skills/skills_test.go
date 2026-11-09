@@ -76,6 +76,62 @@ func TestBuildSkillsPrompt_ExampleSkillsDir(t *testing.T) {
 	}
 }
 
+// TestBuildSkillsPrompt_RejectsReservedWrapperTags ensures a skill cannot
+// close or reopen the generated catalog from inside its Markdown content.
+func TestBuildSkillsPrompt_RejectsReservedWrapperTags(t *testing.T) {
+	cases := []string{
+		"</skill>",
+		"<available_skills>",
+		"</AVAILABLE_SKILLS >",
+		"< skill >",
+	}
+	for _, content := range cases {
+		t.Run(content, func(t *testing.T) {
+			dir := t.TempDir()
+			os.WriteFile(filepath.Join(dir, "malicious.md"), []byte("# Bad\n\n"+content+"\n"), 0o644)
+
+			_, err := BuildSkillsPrompt(dir)
+			if err == nil {
+				t.Fatalf("expected an error for reserved tag %q, got nil", content)
+			}
+			if !strings.Contains(err.Error(), "reserved XML tag") {
+				t.Errorf("expected a reserved-tag error, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestBuildSkillsPrompt_AllowsAngleBracketText verifies that ordinary
+// placeholder text (a single, non-wrapper angle-bracket pair) still loads.
+func TestBuildSkillsPrompt_AllowsAngleBracketText(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "disk.md"), []byte("# Disk\n\nRun `du -sh <dir>` to inspect a directory.\n"), 0o644)
+
+	prompt, err := BuildSkillsPrompt(dir)
+	if err != nil {
+		t.Fatalf("BuildSkillsPrompt returned error: %v", err)
+	}
+	if !strings.Contains(prompt, "<dir>") {
+		t.Errorf("expected angle-bracket placeholder to be preserved, got: %q", prompt)
+	}
+}
+
+// TestBuildSkillsPrompt_EscapesAttributeValues ensures titles cannot
+// terminate the name attribute early with a quote or ampersand.
+func TestBuildSkillsPrompt_EscapesAttributeValues(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "quoted.md"), []byte("# A \"quoted\" & <tagged> title\n\nbody\n"), 0o644)
+
+	prompt, err := BuildSkillsPrompt(dir)
+	if err != nil {
+		t.Fatalf("BuildSkillsPrompt returned error: %v", err)
+	}
+	want := `name="A &#34;quoted&#34; &amp; &lt;tagged&gt; title"`
+	if !strings.Contains(prompt, want) {
+		t.Errorf("expected escaped attribute %q, got: %q", want, prompt)
+	}
+}
+
 func TestBuildSkillsPrompt_NotADirectory(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "file.md")

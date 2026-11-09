@@ -101,7 +101,7 @@ Note: Go tests are colocated as `_test.go` files alongside the package they test
 | `internal/config/config.go` | Config struct definitions with env var interpolation and validation | Parses JSON & YAML via `yaml.v3`; handles `${ENV_VAR}` / `${ENV_VAR:-default}`; applies documented defaults |
 | `internal/llm/client.go` | `net/http`-based OpenAI-compatible chat completions client | Handles tool calls, retries, exponential backoff, and structured error reporting |
 | `internal/ctxmgr/context.go` | Context management engine | Implements tool output truncation, disk spooling, sliding window, and summarization |
-| `internal/skills/skills.go` | Skill loader and prompt augmenter | Recursively scans `*.md` files and injects an `<available_skills>` catalog |
+| `internal/skills/skills.go` | Skill loader and prompt augmenter | Recursively scans `*.md` files, rejects reserved XML wrapper tags, escapes attributes, and injects an `<available_skills>` catalog |
 | `internal/logging/logging.go` | Dual logging engine | Simultaneously generates append-only JSONL event trace and formatted human transcript |
 | `internal/progress/progress.go` | Live, human-facing progress reporter (`-v`) | Nil-receiver-safe `*Reporter`; streams startup/turn/request/tool-call/result/session lines to stderr with secrets masked; no-ops when disabled; in interactive (`-i`) sessions without `-v` it still emits one compact `\|ToolCall : ...` notice line per tool invocation (single-shot never does) |
 | `internal/agent/agent.go` | Core agentic execution loop | `Run` (single-shot) and `RunInteractive` (persistent multi-turn) both share a `runTurn` implementation; orchestrates LLM queries, tool executions, context updates, the loop guard, and the stop condition |
@@ -159,7 +159,7 @@ Note: Go tests are colocated as `_test.go` files alongside the package they test
 | `internal/cliapp/cli_test.go` | `internal/cliapp` | Argument validation, missing files, invalid flags, exit codes |
 | `internal/config/config_test.go` | `internal/config` | JSON/YAML parsing, env substitution, default values, validation errors |
 | `internal/tools/bash_test.go`, `fileops_test.go`, `search_test.go`, `registry_test.go` | `internal/tools` | Command execution, timeouts, file read/write/edit, glob and grep search |
-| `internal/skills/skills_test.go` | `internal/skills` | Recursive directory discovery, Markdown parsing, XML catalog injection |
+| `internal/skills/skills_test.go` | `internal/skills` | Recursive directory discovery, Markdown parsing, reserved-tag rejection, attribute escaping, XML catalog injection |
 | `internal/ctxmgr/context_test.go` | `internal/ctxmgr` | Truncation thresholds, spool file creation, sliding window pruning, summary merging |
 | `internal/logging/logging_test.go` | `internal/logging` | JSONL event schema, human transcript formatting, API key masking |
 | `internal/progress/progress_test.go` | `internal/progress` | Enabled/disabled output, nil-receiver safety, line formatting, secret masking |
