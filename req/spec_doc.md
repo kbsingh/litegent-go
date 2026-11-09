@@ -84,10 +84,10 @@ Go idiom: `cmd/litegent/main.go` is a single statement — `os.Exit(cliapp.Run(o
 
 #### Interface & Flags
 ```
-litegent [-h] [--version] -s SYSTEM -p PROMPT -c CONFIG [-k SKILLS] [-v]
-litegent [-h] [--version] -s SYSTEM -i -c CONFIG [-k SKILLS] [-v]
+litegent [-h] [--version] [-s SYSTEM] -p PROMPT -c CONFIG [-k SKILLS] [-v]
+litegent [-h] [--version] [-s SYSTEM] -i -c CONFIG [-k SKILLS] [-v]
 ```
-- `-s, --system PATH`: Path to system prompt text file. (Mandatory)
+- `-s, --system PATH`: Path to system prompt text file. (Optional; when omitted, the built-in default `You are a helpful agent.` is used.)
 - `-p, --prompt PATH`: Path to task prompt text file. (Mandatory unless `-i` is set; conflicts with `-i`)
 - `-c, --config PATH`: Path to JSON or YAML config file. (Mandatory)
 - `-k, --skills PATH`: Path to directory of skill Markdown files. (Optional)
@@ -98,7 +98,7 @@ litegent [-h] [--version] -s SYSTEM -i -c CONFIG [-k SKILLS] [-v]
 
 Flags are parsed with the standard library `flag` package, not a third-party CLI library: `internal/cliapp.parseArgs` registers each short/long pair (`-s`/`--system`, `-p`/`--prompt`, `-c`/`--config`, `-k`/`--skills`, `-v`/`--verbose`, `-i`/`--interactive`, `-h`/`--help`) twice against the same backing struct field via `flag.FlagSet.StringVar`/`BoolVar`, because stdlib `flag` already treats `-x` and `--x` identically — no external CLI-parsing dependency is needed. `--version` is registered once (it has no short form). The flag set uses `flag.ContinueOnError` with output discarded (`fs.SetOutput(io.Discard)`); `Run` prints its own usage text on a parse error.
 
-Validation order in `Run`: (1) parse flags, (2) handle `-h`/`--version` early-exit, (3) reject `-i` + `-p` together, (4) check required flags (`-s` always; `-p` only if `!interactive`; `-c` always) and report all missing flags in one error, (5) read the system prompt file, (6) read the task prompt file (skipped if `-i`), (7) load and validate the config file, (8) stat + load the skills directory if `-k` was given, (9) construct the logger, tool registry, LLM client, context manager, progress reporter, and `agent.Agent`, (10) run the agentic loop (single-shot or interactive) under a `signal.NotifyContext`-derived cancellable context.
+Validation order in `Run`: (1) parse flags, (2) handle `-h`/`--version` early-exit, (3) reject `-i` + `-p` together, (4) check required flags (`-p` only if `!interactive`; `-c` always) and report all missing flags in one error, (5) read the system prompt file if `-s` was supplied, otherwise use the built-in default prompt, (6) read the task prompt file (skipped if `-i`), (7) load and validate the config file, (8) stat + load the skills directory if `-k` was given, (9) construct the logger, tool registry, LLM client, context manager, progress reporter, and `agent.Agent`, (10) run the agentic loop (single-shot or interactive) under a `signal.NotifyContext`-derived cancellable context.
 
 ##### 2.1.1 Interactive Mode (`-i`)
 
@@ -726,8 +726,9 @@ cliapp.Run(argv, stdin, stdout, stderr) int
      ├─► args, err := parseArgs(argv)                       // flag.FlagSet, stdlib only
      ├─► handle -h / --version (early return)
      ├─► reject -i + -p together
-     ├─► check required flags (-s always, -p unless -i, -c always)
-     ├─► systemBytes := os.ReadFile(args.systemPath)
+     ├─► check required flags (-p unless -i, -c always)
+     ├─► systemPrompt := defaultSystemPrompt                  // if -s omitted
+     │   else systemBytes := os.ReadFile(args.systemPath)
      ├─► promptBytes := os.ReadFile(args.promptPath)         // skipped if -i
      ├─► cfg, err := config.Load(args.configPath)
      ├─► if -k: skillsXML, err := skills.BuildSkillsPrompt(args.skillsPath)

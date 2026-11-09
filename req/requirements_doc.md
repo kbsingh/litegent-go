@@ -51,8 +51,9 @@ Modern AI coding and operations agents often suffer from:
   The agent must be executable via the compiled `litegent` binary (installed on `PATH` or invoked by path), or via `go run ./cmd/litegent` during development.
   
 - **FR-1.2: System Prompt File (`-s, --system`)**  
-  - Must accept a mandatory path pointing to a readable file containing the system prompt.
-  - If the file does not exist or is not readable, Litegent must exit immediately with an error message and exit code `1`.
+  - Shall accept an optional path pointing to a readable file containing the system prompt.
+  - When the flag is omitted, Litegent must use a built-in default system prompt (`You are a helpful agent.`).
+  - If the flag is provided but the file does not exist or is not readable, Litegent must exit immediately with an error message and exit code `1`.
 
 - **FR-1.3: User Prompt File (`-p, --prompt`)**  
   - Must accept a mandatory path pointing to a readable file containing the user's execution prompt.
@@ -82,7 +83,7 @@ Modern AI coding and operations agents often suffer from:
 
 - **FR-2.1: Loop Initialization**  
   In single-shot mode (no `-i`), the agent must initialize the dialogue context with:
-  1. System message containing the content from `-s`, augmented by loaded skills from `-k` (if provided).
+  1. System message containing the content from `-s` (or the built-in default prompt when `-s` is omitted), augmented by loaded skills from `-k` (if provided).
   2. User message containing the content from `-p`.
 
   In interactive mode (`-i`), initialization instead seeds only the system message; the first (and every subsequent) user message is appended per turn as it's read from stdin — see FR-7.1.

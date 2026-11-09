@@ -171,6 +171,39 @@ log_dir: "`+logDir+`"
 	}
 }
 
+func TestRun_DefaultSystemPrompt(t *testing.T) {
+	var seenSystem string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req llm.ChatRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		if len(req.Messages) > 0 {
+			seenSystem = req.Messages[0].Content
+		}
+		json.NewEncoder(w).Encode(llm.ChatResponse{
+			Choices: []llm.Choice{{Message: llm.Message{Role: llm.RoleAssistant, Content: "done"}, FinishReason: "stop"}},
+		})
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	promptPath := writeFile(t, dir, "prompt.txt", "task")
+	logDir := filepath.Join(dir, "logs")
+	cfgPath := writeFile(t, dir, "config.yaml", `
+base_url: "`+server.URL+`"
+model: "test-model"
+log_dir: "`+logDir+`"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"-p", promptPath, "-c", cfgPath}, strings.NewReader(""), &stdout, &stderr)
+	if code != ExitSuccess {
+		t.Fatalf("exit code = %d, want %d, stderr: %s", code, ExitSuccess, stderr.String())
+	}
+	if seenSystem != defaultSystemPrompt {
+		t.Errorf("system prompt = %q, want built-in default %q", seenSystem, defaultSystemPrompt)
+	}
+}
+
 func TestRun_SkillsInjectedIntoSystemPrompt(t *testing.T) {
 	var seenSystem string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
