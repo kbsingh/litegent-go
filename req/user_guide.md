@@ -57,22 +57,22 @@ Use `install.sh` instead when you want the full vet/test gate and a shippable st
 Litegent is executed from the terminal using clear file-based parameters:
 
 ```bash
-litegent -s <system_prompt_file> -p <user_prompt_file> -c <config_file> [-k <skills_directory>] [-v]
+litegent [-s <system_prompt_file>] -p <user_prompt_file> [-c <config_file>] [-k <skills_directory>] [-v]
 ```
 
 Or, for a persistent, multi-turn session (see Section 5.4):
 
 ```bash
-litegent -s <system_prompt_file> -i -c <config_file> [-k <skills_directory>] [-v]
+litegent [-s <system_prompt_file>] -i [-c <config_file>] [-k <skills_directory>] [-v]
 ```
 
 ### Argument Descriptions
 
 | Flag | Full Name | Required? | Description |
 |---|---|---|---|
-| `-s` | `--system` | **Yes** | Path to the file containing the system prompt (agent role, principles, constraints). |
+| `-s` | `--system` | No | Path to the file containing the system prompt (agent role, principles, constraints). Defaults to `~/.litegent/system.md` when present, otherwise the built-in `You are a helpful agent.` |
 | `-p` | `--prompt` | Yes, unless `-i` is set | Path to the file containing the execution prompt (task instructions, requirements). Conflicts with `-i`. |
-| `-c` | `--config` | **Yes** | Path to the configuration file in JSON (`.json`) or YAML (`.yaml`) format. |
+| `-c` | `--config` | No | Path to the configuration file in JSON (`.json`) or YAML (`.yaml`) format. Defaults to `~/.litegent/config.json`. |
 | `-k` | `--skills` | No | Path to a directory containing skill Markdown files (`*.md`) to inject into context. |
 | `-i` | `--interactive` | No | Run a persistent, multi-turn session, reading task prompts from stdin instead of `-p`. |
 | `-v` | `--verbose`| No | Stream live progress to stderr as the loop runs (see Section 5.5). |
@@ -87,6 +87,16 @@ On success, the agent's final response is printed to stdout followed by a `----=
 ## 4. Configuration Guide
 
 Litegent accepts configurations in both **YAML** and **JSON**. Environment variables matching `${VAR_NAME}` or `${VAR_NAME:-default}` are automatically interpolated at runtime.
+
+When `-c` is omitted, Litegent reads `~/.litegent/config.json`. When `-s` is omitted, it reads `~/.litegent/system.md` if that file exists, otherwise it uses the built-in prompt `You are a helpful agent.` Explicit flags always take precedence. Put your durable defaults in `~/.litegent/`:
+
+```text
+~/.litegent/
+├── config.json   # default configuration (used when -c is omitted)
+└── system.md     # default system prompt (used when -s is omitted)
+```
+
+If `-c` is omitted and `~/.litegent/config.json` does not exist, Litegent exits with an error naming that path so the fix is obvious.
 
 ### Complete YAML Configuration Example (`config.yaml`)
 ```yaml

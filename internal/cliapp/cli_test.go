@@ -56,6 +56,99 @@ func TestRun_MissingRequiredFlags(t *testing.T) {
 	}
 }
 
+func TestRun_DefaultConfigLocation(t *testing.T) {
+	var seenSystem string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req llm.ChatRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		if len(req.Messages) > 0 {
+			seenSystem = req.Messages[0].Content
+		}
+		json.NewEncoder(w).Encode(llm.ChatResponse{
+			Choices: []llm.Choice{{Message: llm.Message{Role: llm.RoleAssistant, Content: "done"}, FinishReason: "stop"}},
+		})
+	}))
+	defer server.Close()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	litegentDir := filepath.Join(home, defaultDirName)
+	if err := os.MkdirAll(litegentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, litegentDir, defaultSystemPromptFileName, "home system prompt")
+	logDir := filepath.Join(home, "logs")
+	writeFile(t, litegentDir, defaultConfigFileName, `{
+  "base_url": "`+server.URL+`",
+  "model": "test-model",
+  "log_dir": "`+logDir+`"
+}`)
+	promptPath := writeFile(t, home, "prompt.txt", "task")
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"-p", promptPath}, strings.NewReader(""), &stdout, &stderr)
+	if code != ExitSuccess {
+		t.Fatalf("exit code = %d, want %d, stderr: %s", code, ExitSuccess, stderr.String())
+	}
+	if seenSystem != "home system prompt" {
+		t.Errorf("system prompt = %q, want the ~/.litegent/system.md contents", seenSystem)
+	}
+	if entries, err := os.ReadDir(logDir); err != nil || len(entries) == 0 {
+		t.Errorf("expected logs under the config's log_dir, err=%v entries=%d", err, len(entries))
+	}
+}
+
+func TestRun_DefaultConfigMissing(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	promptPath := writeFile(t, home, "prompt.txt", "task")
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"-p", promptPath}, strings.NewReader(""), &stdout, &stderr)
+	if code != ExitConfigOrCLIError {
+		t.Fatalf("exit code = %d, want %d", code, ExitConfigOrCLIError)
+	}
+	wantPath := filepath.Join(home, defaultDirName, defaultConfigFileName)
+	if !strings.Contains(stderr.String(), "no default config found") || !strings.Contains(stderr.String(), wantPath) {
+		t.Errorf("expected actionable default-config error mentioning %q, got: %q", wantPath, stderr.String())
+	}
+}
+
+func TestRun_DefaultSystemPromptFallback(t *testing.T) {
+	var seenSystem string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req llm.ChatRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		if len(req.Messages) > 0 {
+			seenSystem = req.Messages[0].Content
+		}
+		json.NewEncoder(w).Encode(llm.ChatResponse{
+			Choices: []llm.Choice{{Message: llm.Message{Role: llm.RoleAssistant, Content: "done"}, FinishReason: "stop"}},
+		})
+	}))
+	defer server.Close()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := t.TempDir()
+	promptPath := writeFile(t, dir, "prompt.txt", "task")
+	logDir := filepath.Join(dir, "logs")
+	cfgPath := writeFile(t, dir, "config.yaml", `
+base_url: "`+server.URL+`"
+model: "test-model"
+log_dir: "`+logDir+`"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"-p", promptPath, "-c", cfgPath}, strings.NewReader(""), &stdout, &stderr)
+	if code != ExitSuccess {
+		t.Fatalf("exit code = %d, want %d, stderr: %s", code, ExitSuccess, stderr.String())
+	}
+	if seenSystem != defaultSystemPrompt {
+		t.Errorf("system prompt = %q, want built-in default %q", seenSystem, defaultSystemPrompt)
+	}
+}
+
 func TestRun_MissingSystemFile(t *testing.T) {
 	dir := t.TempDir()
 	promptPath := writeFile(t, dir, "prompt.txt", "do the thing")

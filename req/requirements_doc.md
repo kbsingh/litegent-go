@@ -51,16 +51,18 @@ Modern AI coding and operations agents often suffer from:
   The agent must be executable via the compiled `litegent` binary (installed on `PATH` or invoked by path), or via `go run ./cmd/litegent` during development.
   
 - **FR-1.2: System Prompt File (`-s, --system`)**  
-  - Must accept a mandatory path pointing to a readable file containing the system prompt.
-  - If the file does not exist or is not readable, Litegent must exit immediately with an error message and exit code `1`.
+  - Shall accept an optional path pointing to a readable file containing the system prompt.
+  - When the flag is omitted, Litegent must use `~/.litegent/system.md` if it exists, falling back to the built-in prompt `You are a helpful agent.` otherwise.
+  - If the flag is provided but the file does not exist or is not readable, Litegent must exit immediately with an error message and exit code `1`.
 
 - **FR-1.3: User Prompt File (`-p, --prompt`)**  
   - Must accept a mandatory path pointing to a readable file containing the user's execution prompt.
   - If the file does not exist or is not readable, Litegent must exit immediately with an error message and exit code `1`.
 
 - **FR-1.4: Configuration File (`-c, --config`)**  
-  - Must accept a mandatory path pointing to a valid configuration file formatted in either JSON or YAML.
-  - If the file syntax is invalid or required fields are missing, Litegent must exit immediately with a descriptive schema validation error and exit code `1`.
+  - Shall accept an optional path pointing to a valid configuration file formatted in either JSON or YAML.
+  - When the flag is omitted, Litegent must use `~/.litegent/config.json`.
+  - If the resolved file does not exist, cannot be read, has invalid syntax, or has missing/invalid required fields, Litegent must exit immediately with a descriptive error and exit code `1`.
 
 - **FR-1.5: Skills Directory (`-k, --skills`)**  
   - Shall accept an optional path pointing to a directory containing skill documentation files.
