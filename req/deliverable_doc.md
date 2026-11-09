@@ -67,7 +67,6 @@ The Litegent project deliverables comprise the Go module source code, configurat
 │   └── version/
 │       └── version.go
 ├── examples/                             # Production Examples & Templates
-│   ├── config.yaml
 │   ├── config.json
 │   ├── roles/
 │   │   ├── software_engineer.txt
@@ -94,11 +93,11 @@ Note: Go tests are colocated as `_test.go` files alongside the package they test
 
 | File Path | Description | Acceptance Criteria |
 |---|---|---|
-| `go.mod` / `go.sum` | Module definition and dependency lockfile | `module litegent`; pins `gopkg.in/yaml.v3`, `github.com/bmatcuk/doublestar/v4` (CLI flag parsing uses the standard library `flag` package — no dependency needed) |
+| `go.mod` / `go.sum` | Module definition and dependency lockfile | `module litegent`; pins `github.com/bmatcuk/doublestar/v4` (JSON config parsing and CLI flag parsing use the standard library — no dependency needed) |
 | `internal/version/version.go` | Build version string and accessor | Exposes `const Version = "0.1.0"` (overridable via `-ldflags "-X litegent/internal/version.Version=..."`) |
 | `cmd/litegent/main.go` | CLI entry point: calls `cliapp.Run` and `os.Exit`s with its result | Contains no business logic beyond argument hand-off and exit code translation |
 | `internal/cliapp/cli.go` | Flag parsing (`-s`, `-p`, `-c`, `-k`, `-i`, `-v`, `--version`, `-h`) via stdlib `flag`, file existence/permission checks, and the interactive-mode stdin loop | Validates file existence; provides meaningful errors; returns accurate exit codes; `-i` reads repeated turns from stdin until `/exit`/`/quit`/EOF |
-| `internal/config/config.go` | Config struct definitions with env var interpolation and validation | Parses JSON & YAML via `yaml.v3`; handles `${ENV_VAR}` / `${ENV_VAR:-default}`; applies documented defaults |
+| `internal/config/config.go` | Config struct definitions with env var interpolation and validation | Parses JSON via `encoding/json`; handles `${ENV_VAR}` / `${ENV_VAR:-default}`; applies documented defaults |
 | `internal/llm/client.go` | `net/http`-based OpenAI-compatible chat completions client | Handles tool calls, retries, exponential backoff, and structured error reporting |
 | `internal/ctxmgr/context.go` | Context management engine | Implements tool output truncation, disk spooling, sliding window, and summarization |
 | `internal/skills/skills.go` | Skill loader and prompt augmenter | Recursively scans `*.md` files and injects an `<available_skills>` catalog |
@@ -116,8 +115,7 @@ Note: Go tests are colocated as `_test.go` files alongside the package they test
 
 | File Path | Description | Acceptance Criteria |
 |---|---|---|
-| `examples/config.yaml` | Fully commented YAML configuration template | Contains every configuration option with inline documentation of keys and defaults |
-| `examples/config.json` | Complete JSON configuration template | Valid JSON matching the `LitegentConfig` struct for automated tooling |
+| `examples/config.json` | Complete JSON configuration template | Valid JSON matching the `LitegentConfig` struct, with every configuration option documented in `req/user_guide.md` |
 
 ---
 
@@ -157,7 +155,7 @@ Note: Go tests are colocated as `_test.go` files alongside the package they test
 | Test File | Target Package | Scope |
 |---|---|---|
 | `internal/cliapp/cli_test.go` | `internal/cliapp` | Argument validation, missing files, invalid flags, exit codes |
-| `internal/config/config_test.go` | `internal/config` | JSON/YAML parsing, env substitution, default values, validation errors |
+| `internal/config/config_test.go` | `internal/config` | JSON parsing, env substitution, default values, validation errors |
 | `internal/tools/bash_test.go`, `fileops_test.go`, `search_test.go`, `registry_test.go` | `internal/tools` | Command execution, timeouts, file read/write/edit, glob and grep search |
 | `internal/skills/skills_test.go` | `internal/skills` | Recursive directory discovery, Markdown parsing, XML catalog injection |
 | `internal/ctxmgr/context_test.go` | `internal/ctxmgr` | Truncation thresholds, spool file creation, sliding window pruning, summary merging |

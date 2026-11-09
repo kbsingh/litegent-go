@@ -59,7 +59,7 @@ Modern AI coding and operations agents often suffer from:
   - If the file does not exist or is not readable, Litegent must exit immediately with an error message and exit code `1`.
 
 - **FR-1.4: Configuration File (`-c, --config`)**  
-  - Must accept a mandatory path pointing to a valid configuration file formatted in either JSON or YAML.
+  - Must accept a mandatory path pointing to a valid JSON configuration file.
   - If the file syntax is invalid or required fields are missing, Litegent must exit immediately with a descriptive schema validation error and exit code `1`.
 
 - **FR-1.5: Skills Directory (`-k, --skills`)**  
