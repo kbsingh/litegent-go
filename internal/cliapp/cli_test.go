@@ -183,11 +183,11 @@ func TestRun_DefaultSystemPromptFallback(t *testing.T) {
 	dir := t.TempDir()
 	promptPath := writeFile(t, dir, "prompt.txt", "task")
 	logDir := filepath.Join(dir, "logs")
-	cfgPath := writeFile(t, dir, "config.yaml", `
-base_url: "`+server.URL+`"
-model: "test-model"
-log_dir: "`+logDir+`"
-`)
+	cfgPath := writeFile(t, dir, "config.json", `{
+  "base_url": "`+server.URL+`",
+  "model": "test-model",
+  "log_dir": "`+logDir+`"
+}`)
 
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"-p", promptPath, "-c", cfgPath}, strings.NewReader(""), &stdout, &stderr)
@@ -204,7 +204,7 @@ func TestRun_ExplicitSystemPromptDoesNotCreateDefault(t *testing.T) {
 	t.Setenv("HOME", home)
 	dir := t.TempDir()
 	systemPath := writeFile(t, dir, "system.txt", "explicit system prompt")
-	cfgPath := writeFile(t, dir, "config.yaml", `log_dir: "`+filepath.Join(dir, "logs")+`"`)
+	cfgPath := writeFile(t, dir, "config.json", `{"log_dir": "`+filepath.Join(dir, "logs")+`"}`)
 
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"-s", systemPath, "-i", "-c", cfgPath}, strings.NewReader(""), &stdout, &stderr)
@@ -223,7 +223,7 @@ func TestRun_ExplicitSystemPromptDoesNotCreateDefault(t *testing.T) {
 func TestRun_MissingSystemFile(t *testing.T) {
 	dir := t.TempDir()
 	promptPath := writeFile(t, dir, "prompt.txt", "do the thing")
-	cfgPath := writeFile(t, dir, "config.yaml", "model: gpt-4o\n")
+	cfgPath := writeFile(t, dir, "config.json", `{"model": "gpt-4o"}`)
 
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{
@@ -240,7 +240,7 @@ func TestRun_InvalidConfig(t *testing.T) {
 	dir := t.TempDir()
 	systemPath := writeFile(t, dir, "system.txt", "you are an agent")
 	promptPath := writeFile(t, dir, "prompt.txt", "do the thing")
-	cfgPath := writeFile(t, dir, "config.yaml", "max_steps: -5\n")
+	cfgPath := writeFile(t, dir, "config.json", `{"max_steps": -5}`)
 
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"-s", systemPath, "-p", promptPath, "-c", cfgPath}, strings.NewReader(""), &stdout, &stderr)
@@ -253,7 +253,7 @@ func TestRun_MissingSkillsDir(t *testing.T) {
 	dir := t.TempDir()
 	systemPath := writeFile(t, dir, "system.txt", "you are an agent")
 	promptPath := writeFile(t, dir, "prompt.txt", "do the thing")
-	cfgPath := writeFile(t, dir, "config.yaml", "model: gpt-4o\n")
+	cfgPath := writeFile(t, dir, "config.json", `{"model": "gpt-4o"}`)
 
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{
@@ -306,13 +306,13 @@ func TestRun_EndToEndSuccess(t *testing.T) {
 	systemPath := writeFile(t, dir, "system.txt", "you are a helpful agent")
 	promptPath := writeFile(t, dir, "prompt.txt", "say hello")
 	logDir := filepath.Join(dir, "logs")
-	cfgPath := writeFile(t, dir, "config.yaml", `
-base_url: "`+server.URL+`"
-api_key: "test-key"
-model: "test-model"
-max_steps: 5
-log_dir: "`+logDir+`"
-`)
+	cfgPath := writeFile(t, dir, "config.json", `{
+  "base_url": "`+server.URL+`",
+  "api_key": "test-key",
+  "model": "test-model",
+  "max_steps": 5,
+  "log_dir": "`+logDir+`"
+}`)
 
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"-s", systemPath, "-p", promptPath, "-c", cfgPath}, strings.NewReader(""), &stdout, &stderr)
@@ -356,11 +356,11 @@ func TestRun_SkillsInjectedIntoSystemPrompt(t *testing.T) {
 	os.MkdirAll(skillsDir, 0o755)
 	writeFile(t, skillsDir, "git.md", "# Git Workflow\nAlways check status first.\n")
 	logDir := filepath.Join(dir, "logs")
-	cfgPath := writeFile(t, dir, "config.yaml", `
-base_url: "`+server.URL+`"
-model: "test-model"
-log_dir: "`+logDir+`"
-`)
+	cfgPath := writeFile(t, dir, "config.json", `{
+  "base_url": "`+server.URL+`",
+  "model": "test-model",
+  "log_dir": "`+logDir+`"
+}`)
 
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"-s", systemPath, "-p", promptPath, "-c", cfgPath, "-k", skillsDir}, strings.NewReader(""), &stdout, &stderr)
@@ -376,7 +376,7 @@ func TestRun_InteractiveConflictsWithPrompt(t *testing.T) {
 	dir := t.TempDir()
 	systemPath := writeFile(t, dir, "system.txt", "you are an agent")
 	promptPath := writeFile(t, dir, "prompt.txt", "do the thing")
-	cfgPath := writeFile(t, dir, "config.yaml", "model: gpt-4o\n")
+	cfgPath := writeFile(t, dir, "config.json", `{"model": "gpt-4o"}`)
 
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"-s", systemPath, "-p", promptPath, "-c", cfgPath, "-i"}, strings.NewReader(""), &stdout, &stderr)
@@ -392,7 +392,7 @@ func TestRun_InteractiveDoesNotRequirePromptFile(t *testing.T) {
 	dir := t.TempDir()
 	systemPath := writeFile(t, dir, "system.txt", "you are an agent")
 	logDir := filepath.Join(dir, "logs")
-	cfgPath := writeFile(t, dir, "config.yaml", "model: gpt-4o\nlog_dir: \""+logDir+"\"\n")
+	cfgPath := writeFile(t, dir, "config.json", `{"model": "gpt-4o", "log_dir": "`+logDir+`"}`)
 
 	var stdout, stderr bytes.Buffer
 	// No LLM endpoint reachable, but stdin is empty (immediate EOF), so
@@ -427,11 +427,11 @@ func TestRun_InteractiveMultipleTurns(t *testing.T) {
 	dir := t.TempDir()
 	systemPath := writeFile(t, dir, "system.txt", "you are an agent")
 	logDir := filepath.Join(dir, "logs")
-	cfgPath := writeFile(t, dir, "config.yaml", `
-base_url: "`+server.URL+`"
-model: "test-model"
-log_dir: "`+logDir+`"
-`)
+	cfgPath := writeFile(t, dir, "config.json", `{
+  "base_url": "`+server.URL+`",
+  "model": "test-model",
+  "log_dir": "`+logDir+`"
+}`)
 
 	stdin := strings.NewReader("first question\nsecond question\n/exit\n")
 	var stdout, stderr bytes.Buffer
@@ -486,11 +486,11 @@ func TestRun_InteractiveToolCallNotices(t *testing.T) {
 	dir := t.TempDir()
 	systemPath := writeFile(t, dir, "system.txt", "you are an agent")
 	logDir := filepath.Join(dir, "logs")
-	cfgPath := writeFile(t, dir, "config.yaml", `
-base_url: "`+server.URL+`"
-model: "test-model"
-log_dir: "`+logDir+`"
-`)
+	cfgPath := writeFile(t, dir, "config.json", `{
+  "base_url": "`+server.URL+`",
+  "model": "test-model",
+  "log_dir": "`+logDir+`"
+}`)
 
 	run := func(verbose bool) (string, string) {
 		args := []string{"-s", systemPath, "-i", "-c", cfgPath}
@@ -536,11 +536,11 @@ func TestRun_InteractiveEOFEndsSessionCleanly(t *testing.T) {
 	dir := t.TempDir()
 	systemPath := writeFile(t, dir, "system.txt", "you are an agent")
 	logDir := filepath.Join(dir, "logs")
-	cfgPath := writeFile(t, dir, "config.yaml", `
-base_url: "`+server.URL+`"
-model: "test-model"
-log_dir: "`+logDir+`"
-`)
+	cfgPath := writeFile(t, dir, "config.json", `{
+  "base_url": "`+server.URL+`",
+  "model": "test-model",
+  "log_dir": "`+logDir+`"
+}`)
 
 	// No trailing /exit — just EOF after one line.
 	stdin := strings.NewReader("only question")
@@ -565,11 +565,11 @@ func TestRun_InteractiveVerboseProgress(t *testing.T) {
 	dir := t.TempDir()
 	systemPath := writeFile(t, dir, "system.txt", "you are an agent")
 	logDir := filepath.Join(dir, "logs")
-	cfgPath := writeFile(t, dir, "config.yaml", `
-base_url: "`+server.URL+`"
-model: "test-model"
-log_dir: "`+logDir+`"
-`)
+	cfgPath := writeFile(t, dir, "config.json", `{
+  "base_url": "`+server.URL+`",
+  "model": "test-model",
+  "log_dir": "`+logDir+`"
+}`)
 
 	stdin := strings.NewReader("hello\n/exit\n")
 	var stdout, stderr bytes.Buffer

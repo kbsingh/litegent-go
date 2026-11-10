@@ -46,7 +46,7 @@ litegent --version
 ### Quick Dev Loop (`run.sh`)
 While iterating on Litegent itself, `./run.sh` rebuilds (`go build`, which is a fast no-op when nothing changed) and runs the binary in one step, forwarding all arguments:
 ```bash
-./run.sh -s examples/roles/software_engineer.txt -p examples/prompts/software_engineer_task.txt -c examples/config.yaml
+./run.sh -s examples/roles/software_engineer.txt -p examples/prompts/software_engineer_task.txt -c examples/config.json
 ```
 Use `install.sh` instead when you want the full vet/test gate and a shippable static binary; `run.sh` is purely a local convenience wrapper.
 
@@ -72,7 +72,7 @@ litegent [-s <system_prompt_file>] -i [-c <config_file>] [-k <skills_directory>]
 |---|---|---|---|
 | `-s` | `--system` | No | Path to the file containing the system prompt (agent role, principles, constraints). Defaults to `~/.litegent/system.md`; if that file is absent, Litegent creates it with the built-in default system prompt (see Section 5.1). |
 | `-p` | `--prompt` | Yes, unless `-i` is set | Path to the file containing the execution prompt (task instructions, requirements). Conflicts with `-i`. |
-| `-c` | `--config` | No | Path to the configuration file in JSON (`.json`) or YAML (`.yaml`) format. Defaults to `~/.litegent/config.json`. |
+| `-c` | `--config` | No | Path to the JSON configuration file (`.json`). Defaults to `~/.litegent/config.json`. |
 | `-k` | `--skills` | No | Path to a directory containing skill Markdown files (`*.md`) to inject into context. |
 | `-i` | `--interactive` | No | Run a persistent, multi-turn session, reading task prompts from stdin instead of `-p`. |
 | `-v` | `--verbose`| No | Stream live progress to stderr as the loop runs (see Section 5.5). |
@@ -86,7 +86,7 @@ On success, the agent's final response is printed to stdout followed by a `----=
 
 ## 4. Configuration Guide
 
-Litegent accepts configurations in both **YAML** and **JSON**. Environment variables matching `${VAR_NAME}` or `${VAR_NAME:-default}` are automatically interpolated at runtime.
+Litegent accepts **JSON configuration files only**. Environment variables matching `${VAR_NAME}` or `${VAR_NAME:-default}` are automatically interpolated at runtime.
 
 When `-c` is omitted, Litegent reads `~/.litegent/config.json`. When `-s` is omitted, it reads `~/.litegent/system.md`; if that file does not exist, Litegent creates it with the built-in default system prompt (quoted in Section 5.1). Explicit flags always take precedence. Put your durable defaults in `~/.litegent/`:
 
@@ -98,50 +98,46 @@ When `-c` is omitted, Litegent reads `~/.litegent/config.json`. When `-s` is omi
 
 If `-c` is omitted and `~/.litegent/config.json` does not exist, Litegent creates it (and `~/.litegent/` itself) with the documented example values, then continues. The generated file uses `"${OPENAI_API_KEY}"` as its API-key placeholder, so no real credential is written, and an existing config is never overwritten. Likewise, if `-s` is omitted and `~/.litegent/system.md` does not exist, Litegent writes the built-in default prompt there. Litegent prints a one-line notice to stderr when it creates either file.
 
-### Complete YAML Configuration Example (`config.yaml`)
-```yaml
-# LLM Endpoint & Credentials
-base_url: "https://api.openai.com/v1"
-api_key: "${OPENAI_API_KEY}"
-model: "gpt-4o"
-temperature: 0.0
-max_tokens: 4096
-# Thinking/reasoning control: free text forwarded verbatim to your
-# endpoint. "default" (or omitted) sends nothing. Use whatever your model
-# accepts, e.g. "low"/"medium"/"high" or "enabled"/"disabled".
-# thinking_format picks the wire shape when a level is set:
-# "reasoning_effort" (default) or "thinking" ({"thinking":{"type":...}}).
-thinking_level: "default"
-thinking_format: "reasoning_effort"
-timeout: 120.0
-
-# Execution Safety Limits
-max_steps: 30
-
-# Context Management Engine
-manage_context: true
-context_config:
-  max_context_tokens: 16000
-  max_tool_output_chars: 4000
-  window_size: 20
-  spool_dir: ".tmp/tool_outputs"
-
-# Logging Destination
-log_dir: "./logs"
-
-# Built-in Tools Configuration
-tools:
-  bash:
-    enabled: true
-    timeout: 60.0
-    default_workdir: "."
-  file_ops:
-    enabled: true
-    max_read_lines: 2000
-  search:
-    enabled: true
-    max_search_results: 100
+### Complete JSON Configuration Example (`config.json`)
+```json
+{
+  "base_url": "https://api.openai.com/v1",
+  "api_key": "${OPENAI_API_KEY}",
+  "model": "gpt-4o",
+  "temperature": 0.0,
+  "max_tokens": 4096,
+  "thinking_level": "default",
+  "thinking_format": "reasoning_effort",
+  "timeout": 120.0,
+  "max_steps": 30,
+  "max_repeated_tool_calls": 3,
+  "manage_context": true,
+  "context_config": {
+    "max_context_tokens": 16000,
+    "max_tool_output_chars": 4000,
+    "window_size": 20,
+    "spool_dir": ".tmp/tool_outputs"
+  },
+  "log_dir": "./logs",
+  "tools": {
+    "bash": {
+      "enabled": true,
+      "timeout": 60.0,
+      "default_workdir": "."
+    },
+    "file_ops": {
+      "enabled": true,
+      "max_read_lines": 2000
+    },
+    "search": {
+      "enabled": true,
+      "max_search_results": 100
+    }
+  }
+}
 ```
+
+Key fields: `base_url` and `api_key` identify the endpoint; `model`, `temperature`, `max_tokens`, and `timeout` control requests; `max_steps` caps agentic iterations; `max_repeated_tool_calls` controls the loop guard; `manage_context` and `context_config` drive truncation, pruning, and summarization; `log_dir` selects the audit-log destination; and `tools` enables/configures the built-in tool groups. See `examples/config.json` for the same template.
 
 A few notes on the thinking settings:
 - An empty `thinking_level` behaves exactly like `"default"`: nothing is sent and the model decides.
@@ -195,7 +191,7 @@ Skills are standard Markdown files (`*.md`) located inside a directory passed vi
 ### 5.4 Interactive Mode (`-i`)
 Pass `-i` instead of `-p` to start a persistent, multi-turn session instead of a single task:
 ```bash
-litegent -s examples/roles/software_engineer.txt -i -c examples/config.yaml
+litegent -s examples/roles/software_engineer.txt -i -c examples/config.json
 ```
 Litegent prints a `> ` prompt on stderr and reads one line at a time from stdin:
 - Each non-blank line starts a new turn; Litegent runs it to completion and prints the final response to stdout, followed by a `----====----` separator line, before prompting again — so turn boundaries are always visually clear.
@@ -291,7 +287,7 @@ cat logs/trace_*.jsonl | jq 'select(.event_type=="llm_response") | {step: .step,
 litegent \
   -s examples/roles/software_engineer.txt \
   -p examples/prompts/software_engineer_task.txt \
-  -c examples/config.yaml
+  -c examples/config.json
 ```
 
 ### Recipe 2: Run a System Health Audit with Skills
@@ -299,21 +295,23 @@ litegent \
 litegent \
   -s examples/roles/sysadmin_sre.txt \
   -p examples/prompts/sysadmin_health_check.txt \
-  -c examples/config.yaml \
+  -c examples/config.json \
   -k examples/skills/
 ```
 
 ### Recipe 3: Execute Against a Local Ollama Instance
-Configure `config.yaml`:
-```yaml
-base_url: "http://localhost:11434/v1"
-api_key: "ollama"
-model: "qwen2.5-coder:32b"
-manage_context: true
+Configure `config.json`:
+```json
+{
+  "base_url": "http://localhost:11434/v1",
+  "api_key": "ollama",
+  "model": "qwen2.5-coder:32b",
+  "manage_context": true
+}
 ```
 Run:
 ```bash
-litegent -s system.txt -p prompt.txt -c config.yaml
+litegent -s system.txt -p prompt.txt -c config.json
 ```
 
 ### Recipe 4: Interactive Pairing Session with Live Progress
@@ -321,7 +319,7 @@ litegent -s system.txt -p prompt.txt -c config.yaml
 litegent \
   -s examples/roles/software_engineer.txt \
   -i \
-  -c examples/config.yaml \
+  -c examples/config.json \
   -v
 ```
 Then type one task per line (e.g. `run the tests`, then `now fix the failure you found`), watching live progress on stderr and each turn's answer on stdout. Type `/exit` when done.
@@ -331,10 +329,10 @@ Then type one task per line (e.g. `run the tests`, then `now fix the failure you
 ## 9. Troubleshooting & FAQ
 
 ### Q: Why did the agent stop before finishing the task?
-Check if `max_steps` was reached. In single-shot mode this exits the process with code `2`. In interactive mode (`-i`), `max_steps` applies per turn — Litegent reports the exhausted turn on stderr but keeps the session running, since conversation history is still valid for your next line. Either way, if the task is complex, increase `max_steps: 50` in your `config.yaml`.
+Check if `max_steps` was reached. In single-shot mode this exits the process with code `2`. In interactive mode (`-i`), `max_steps` applies per turn — Litegent reports the exhausted turn on stderr but keeps the session running, since conversation history is still valid for your next line. Either way, if the task is complex, increase `"max_steps": 50` in your `config.json`.
 
 ### Q: How do I resolve `AuthenticationError`?
-Ensure your `OPENAI_API_KEY` environment variable is set (`export OPENAI_API_KEY="sk-..."`) or referenced correctly in `config.yaml`.
+Ensure your `OPENAI_API_KEY` environment variable is set (`export OPENAI_API_KEY="sk-..."`) or referenced correctly in `config.json`.
 
 ### Q: How can I see command outputs if they were truncated?
 Litegent prints the exact spool file path in the logs (e.g., `.tmp/tool_outputs/call_abc123.txt`). You can inspect this file directly with `less` or `cat`.

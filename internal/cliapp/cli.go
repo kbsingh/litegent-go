@@ -74,9 +74,9 @@ Usage:
   litegent [-s <system_prompt_file>] -i [-c <config_file>] [-k <skills_directory>] [-v]
 
 Flags:
-  -s, --system PATH   Path to the system prompt file (default: ~/.litegent/system.md if present, else a built-in prompt)
+  -s, --system PATH   Path to the system prompt file (default: ~/.litegent/system.md, created if absent)
   -p, --prompt PATH   Path to the task prompt file (required unless -i is set)
-  -c, --config PATH   Path to the JSON or YAML config file (default: ~/.litegent/config.json)
+  -c, --config PATH   Path to the JSON config file (default: ~/.litegent/config.json)
   -k, --skills PATH   Path to a directory of skill Markdown files (optional)
   -i, --interactive   Read repeated task prompts from stdin; conflicts with -p
   -v, --verbose       Enable verbose progress output to stderr as the loop runs
@@ -183,8 +183,8 @@ func parseArgs(argv []string) (*cliArgs, error) {
 	fs.StringVar(&args.systemPath, "system", "", "path to system prompt file (default: ~/.litegent/system.md)")
 	fs.StringVar(&args.promptPath, "p", "", "path to task prompt file")
 	fs.StringVar(&args.promptPath, "prompt", "", "path to task prompt file")
-	fs.StringVar(&args.configPath, "c", "", "path to JSON/YAML config file (default: ~/.litegent/config.json)")
-	fs.StringVar(&args.configPath, "config", "", "path to JSON/YAML config file (default: ~/.litegent/config.json)")
+	fs.StringVar(&args.configPath, "c", "", "path to JSON config file (default: ~/.litegent/config.json)")
+	fs.StringVar(&args.configPath, "config", "", "path to JSON config file (default: ~/.litegent/config.json)")
 	fs.StringVar(&args.skillsPath, "k", "", "path to skills directory")
 	fs.StringVar(&args.skillsPath, "skills", "", "path to skills directory")
 	fs.BoolVar(&args.verbose, "v", false, "enable verbose output")

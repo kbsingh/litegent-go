@@ -1,5 +1,5 @@
-// Package config loads and validates the Litegent configuration file
-// (JSON or YAML), applying documented defaults and environment variable
+// Package config loads and validates the Litegent JSON configuration
+// file, applying documented defaults and environment variable
 // interpolation. See req/spec_doc.md section 2.2.
 package config
 
@@ -11,27 +11,25 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-
-	"gopkg.in/yaml.v3"
 )
 
 // ToolBashConfig controls the bash tool.
 type ToolBashConfig struct {
-	Enabled        bool    `yaml:"enabled" json:"enabled"`
-	Timeout        float64 `yaml:"timeout" json:"timeout"`
-	DefaultWorkdir string  `yaml:"default_workdir" json:"default_workdir"`
+	Enabled        bool    `json:"enabled"`
+	Timeout        float64 `json:"timeout"`
+	DefaultWorkdir string  `json:"default_workdir"`
 }
 
 // ToolFileOpsConfig controls read_file/write_file/edit_file.
 type ToolFileOpsConfig struct {
-	Enabled      bool `yaml:"enabled" json:"enabled"`
-	MaxReadLines int  `yaml:"max_read_lines" json:"max_read_lines"`
+	Enabled      bool `json:"enabled"`
+	MaxReadLines int  `json:"max_read_lines"`
 }
 
 // ToolSearchConfig controls glob_search/grep_search.
 type ToolSearchConfig struct {
-	Enabled          bool `yaml:"enabled" json:"enabled"`
-	MaxSearchResults int  `yaml:"max_search_results" json:"max_search_results"`
+	Enabled          bool `json:"enabled"`
+	MaxSearchResults int  `json:"max_search_results"`
 }
 
 // Thinking wire formats selectable via thinking_format when
@@ -46,35 +44,35 @@ const (
 
 // ToolsConfig aggregates per-tool configuration.
 type ToolsConfig struct {
-	Bash    ToolBashConfig    `yaml:"bash" json:"bash"`
-	FileOps ToolFileOpsConfig `yaml:"file_ops" json:"file_ops"`
-	Search  ToolSearchConfig  `yaml:"search" json:"search"`
+	Bash    ToolBashConfig    `json:"bash"`
+	FileOps ToolFileOpsConfig `json:"file_ops"`
+	Search  ToolSearchConfig  `json:"search"`
 }
 
 // ContextConfig controls the context management engine.
 type ContextConfig struct {
-	MaxContextTokens   int    `yaml:"max_context_tokens" json:"max_context_tokens"`
-	MaxToolOutputChars int    `yaml:"max_tool_output_chars" json:"max_tool_output_chars"`
-	WindowSize         int    `yaml:"window_size" json:"window_size"`
-	SpoolDir           string `yaml:"spool_dir" json:"spool_dir"`
+	MaxContextTokens   int    `json:"max_context_tokens"`
+	MaxToolOutputChars int    `json:"max_tool_output_chars"`
+	WindowSize         int    `json:"window_size"`
+	SpoolDir           string `json:"spool_dir"`
 }
 
 // LitegentConfig is the full configuration schema accepted via -c/--config.
 type LitegentConfig struct {
-	BaseURL              string        `yaml:"base_url" json:"base_url"`
-	APIKey               string        `yaml:"api_key" json:"api_key"`
-	Model                string        `yaml:"model" json:"model"`
-	Temperature          float64       `yaml:"temperature" json:"temperature"`
-	MaxTokens            int           `yaml:"max_tokens" json:"max_tokens"`
-	ThinkingLevel        string        `yaml:"thinking_level" json:"thinking_level"`
-	ThinkingFormat       string        `yaml:"thinking_format" json:"thinking_format"`
-	Timeout              float64       `yaml:"timeout" json:"timeout"`
-	MaxSteps             int           `yaml:"max_steps" json:"max_steps"`
-	MaxRepeatedToolCalls int           `yaml:"max_repeated_tool_calls" json:"max_repeated_tool_calls"`
-	ManageContext        bool          `yaml:"manage_context" json:"manage_context"`
-	ContextConfig        ContextConfig `yaml:"context_config" json:"context_config"`
-	LogDir               string        `yaml:"log_dir" json:"log_dir"`
-	Tools                ToolsConfig   `yaml:"tools" json:"tools"`
+	BaseURL              string        `json:"base_url"`
+	APIKey               string        `json:"api_key"`
+	Model                string        `json:"model"`
+	Temperature          float64       `json:"temperature"`
+	MaxTokens            int           `json:"max_tokens"`
+	ThinkingLevel        string        `json:"thinking_level"`
+	ThinkingFormat       string        `json:"thinking_format"`
+	Timeout              float64       `json:"timeout"`
+	MaxSteps             int           `json:"max_steps"`
+	MaxRepeatedToolCalls int           `json:"max_repeated_tool_calls"`
+	ManageContext        bool          `json:"manage_context"`
+	ContextConfig        ContextConfig `json:"context_config"`
+	LogDir               string        `json:"log_dir"`
+	Tools                ToolsConfig   `json:"tools"`
 }
 
 // Default returns the documented default configuration. Load starts from
@@ -184,20 +182,18 @@ func interpolateEnv(raw string) string {
 	})
 }
 
-// Load reads the config file at path (JSON or YAML — JSON is valid YAML,
-// so a single yaml.Unmarshal call handles both formats), interpolates
-// environment variable references, and validates the result.
+// Load reads the JSON config file at path, interpolates environment
+// variable references, and validates the result.
 func Load(path string) (LitegentConfig, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return LitegentConfig{}, fmt.Errorf("reading config %q: %w", path, err)
 	}
 
-	// Valid JSON is also valid YAML, so this single yaml.Unmarshal call
-	// transparently handles both configuration formats accepted by
-	// -c/--config.
+	// Start from the documented defaults, then unmarshal the user's JSON
+	// on top so omitted keys keep their defaults instead of zeroing out.
 	cfg := Default()
-	if err := yaml.Unmarshal([]byte(interpolateEnv(string(raw))), &cfg); err != nil {
+	if err := json.Unmarshal([]byte(interpolateEnv(string(raw))), &cfg); err != nil {
 		return LitegentConfig{}, fmt.Errorf("parsing config %q: %w", path, err)
 	}
 
