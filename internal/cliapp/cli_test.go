@@ -98,7 +98,7 @@ func TestRun_DefaultConfigLocation(t *testing.T) {
 	}
 }
 
-func TestRun_CreatesDefaultConfig(t *testing.T) {
+func TestRun_CreatesDefaultFiles(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Chdir(t.TempDir()) // keep the default "./logs" out of the repo tree
@@ -109,35 +109,58 @@ func TestRun_CreatesDefaultConfig(t *testing.T) {
 		t.Fatalf("exit code = %d, want %d, stderr: %s", code, ExitSuccess, stderr.String())
 	}
 
-	path := filepath.Join(home, defaultDirName, defaultConfigFileName)
-	data, err := os.ReadFile(path)
+	configPath := filepath.Join(home, defaultDirName, defaultConfigFileName)
+	configData, err := os.ReadFile(configPath)
 	if err != nil {
-		t.Fatalf("expected default config at %s: %v", path, err)
+		t.Fatalf("expected default config at %s: %v", configPath, err)
 	}
-	if !strings.Contains(string(data), `"${OPENAI_API_KEY}"`) {
-		t.Errorf("expected generated config to use an API-key placeholder, got: %s", data)
+	if !strings.Contains(string(configData), `"${OPENAI_API_KEY}"`) {
+		t.Errorf("expected generated config to use an API-key placeholder, got: %s", configData)
 	}
-	if !strings.Contains(stderr.String(), "created default config at "+path) {
-		t.Errorf("expected creation notice on stderr, got: %q", stderr.String())
+	if !strings.Contains(stderr.String(), "created default config at "+configPath) {
+		t.Errorf("expected config creation notice on stderr, got: %q", stderr.String())
 	}
 
-	// A second run must reuse the file rather than rewriting it.
-	before := string(data)
+	systemPath := filepath.Join(home, defaultDirName, defaultSystemPromptFileName)
+	systemData, err := os.ReadFile(systemPath)
+	if err != nil {
+		t.Fatalf("expected default system prompt at %s: %v", systemPath, err)
+	}
+	if string(systemData) != defaultSystemPrompt {
+		t.Errorf("default system prompt = %q, want %q", systemData, defaultSystemPrompt)
+	}
+	if !strings.Contains(stderr.String(), "created default system prompt at "+systemPath) {
+		t.Errorf("expected system-prompt creation notice on stderr, got: %q", stderr.String())
+	}
+
+	// A second run must reuse both files rather than rewriting them. Use
+	// a custom system prompt so an overwrite would be obvious.
+	const customPrompt = "custom prompt from the user"
+	if err := os.WriteFile(systemPath, []byte(customPrompt), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	stdout.Reset()
 	stderr.Reset()
 	code = Run([]string{"-i"}, strings.NewReader(""), &stdout, &stderr)
 	if code != ExitSuccess {
 		t.Fatalf("second run exit code = %d, want %d, stderr: %s", code, ExitSuccess, stderr.String())
 	}
-	after, err := os.ReadFile(path)
+	after, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(after) != before {
+	if string(after) != string(configData) {
 		t.Error("existing default config was overwritten on the second run")
 	}
-	if strings.Contains(stderr.String(), "created default config") {
-		t.Errorf("second run must not report creating the config again, got: %q", stderr.String())
+	afterSystem, err := os.ReadFile(systemPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterSystem) != customPrompt {
+		t.Error("existing default system prompt was overwritten on the second run")
+	}
+	if strings.Contains(stderr.String(), "created default config") || strings.Contains(stderr.String(), "created default system prompt") {
+		t.Errorf("second run must not report creating either default file again, got: %q", stderr.String())
 	}
 }
 
@@ -173,6 +196,27 @@ log_dir: "`+logDir+`"
 	}
 	if seenSystem != defaultSystemPrompt {
 		t.Errorf("system prompt = %q, want built-in default %q", seenSystem, defaultSystemPrompt)
+	}
+}
+
+func TestRun_ExplicitSystemPromptDoesNotCreateDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := t.TempDir()
+	systemPath := writeFile(t, dir, "system.txt", "explicit system prompt")
+	cfgPath := writeFile(t, dir, "config.yaml", `log_dir: "`+filepath.Join(dir, "logs")+`"`)
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"-s", systemPath, "-i", "-c", cfgPath}, strings.NewReader(""), &stdout, &stderr)
+	if code != ExitSuccess {
+		t.Fatalf("exit code = %d, want %d, stderr: %s", code, ExitSuccess, stderr.String())
+	}
+	defaultPath := filepath.Join(home, defaultDirName, defaultSystemPromptFileName)
+	if _, err := os.Stat(defaultPath); err == nil {
+		t.Errorf("explicit -s must not create %s", defaultPath)
+	}
+	if strings.Contains(stderr.String(), "created default system prompt") {
+		t.Errorf("explicit -s must not report creating a default prompt, got: %q", stderr.String())
 	}
 }
 
