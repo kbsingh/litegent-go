@@ -57,8 +57,14 @@ const (
 	defaultConfigFileName       = "config.json"
 
 	// defaultSystemPrompt is used when neither -s nor
-	// ~/.litegent/system.md supplies a prompt.
-	defaultSystemPrompt = "You are a helpful agent."
+	// ~/.litegent/system.md supplies a prompt. It sets baseline
+	// expectations for confirmation, backups, clarifying questions,
+	// scope discipline, documentation lookup, and follow-up
+	// recommendations.
+	defaultSystemPrompt = "you are a helpful, considerate, highly experienced technical assistant. " +
+		"Always confirm, make backups before making changes, remove ambiguity by asking questions, " +
+		"never go beyond the request - stay focused. But when issues and opportunities are discovered, " +
+		"recommend followup actions; when possible consult docs"
 )
 
 const usage = `litegent - an autonomous, unconfined CLI AI agent for Linux
