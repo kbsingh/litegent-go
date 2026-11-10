@@ -11,11 +11,14 @@ package cliapp
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -45,25 +48,35 @@ const (
 // transcript. It is presentation only — never added to history.
 const turnSeparator = "----====----"
 
-// defaultSystemPrompt is used when no -s/--system file is supplied. It
-// sets baseline expectations for confirmation, backups, clarifying
-// questions, scope discipline, and follow-up recommendations; callers
-// that need a specific role should provide their own prompt file.
-const defaultSystemPrompt = "you are a helpful, considerate, highly experienced technical assistant. " +
-	"Always confirm, make backups before making changes, remove ambiguity by asking questions, " +
-	"never go beyond the request - stay focused. But when issues and opportunities are discovered, " +
-	"recommend followup actions; when possible consult docs"
+// Default locations under the user's home directory. Litegent treats
+// ~/.litegent/ as the place to keep durable agent configuration:
+// system.md for the system prompt and config.json for the configuration.
+const (
+	defaultDirName              = ".litegent"
+	defaultSystemPromptFileName = "system.md"
+	defaultConfigFileName       = "config.json"
+
+	// defaultSystemPrompt is used when neither -s nor
+	// ~/.litegent/system.md supplies a prompt. It sets baseline
+	// expectations for confirmation, backups, clarifying questions,
+	// scope discipline, documentation lookup, and follow-up
+	// recommendations.
+	defaultSystemPrompt = "you are a helpful, considerate, highly experienced technical assistant. " +
+		"Always confirm, make backups before making changes, remove ambiguity by asking questions, " +
+		"never go beyond the request - stay focused. But when issues and opportunities are discovered, " +
+		"recommend followup actions; when possible consult docs"
+)
 
 const usage = `litegent - an autonomous, unconfined CLI AI agent for Linux
 
 Usage:
-  litegent [-s <system_prompt_file>] -p <user_prompt_file> -c <config_file> [-k <skills_directory>] [-v]
-  litegent [-s <system_prompt_file>] -i -c <config_file> [-k <skills_directory>] [-v]
+  litegent [-s <system_prompt_file>] -p <user_prompt_file> [-c <config_file>] [-k <skills_directory>] [-v]
+  litegent [-s <system_prompt_file>] -i [-c <config_file>] [-k <skills_directory>] [-v]
 
 Flags:
-  -s, --system PATH   Path to the system prompt file (optional; defaults to a built-in prompt)
+  -s, --system PATH   Path to the system prompt file (default: ~/.litegent/system.md if present, else a built-in prompt)
   -p, --prompt PATH   Path to the task prompt file (required unless -i is set)
-  -c, --config PATH   Path to the JSON config file (required)
+  -c, --config PATH   Path to the JSON config file (default: ~/.litegent/config.json)
   -k, --skills PATH   Path to a directory of skill Markdown files (optional)
   -i, --interactive   Read repeated task prompts from stdin; conflicts with -p
   -v, --verbose       Enable verbose progress output to stderr as the loop runs
@@ -75,6 +88,38 @@ an empty line to re-prompt. Type /exit or /quit, or send EOF (Ctrl+D), to
 end the session. Conversation history persists across turns; max_steps
 applies independently to each turn.
 `
+
+// defaultLitegentDir returns the per-user configuration directory,
+// ~/.litegent. It is a location convention only — Litegent remains
+// unconfined and will happily read config or prompts from anywhere when
+// explicit flags point elsewhere.
+func defaultLitegentDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("determining home directory: %w", err)
+	}
+	return filepath.Join(home, defaultDirName), nil
+}
+
+// defaultConfigPath returns ~/.litegent/config.json, the config used when
+// -c/--config is omitted.
+func defaultConfigPath() (string, error) {
+	dir, err := defaultLitegentDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, defaultConfigFileName), nil
+}
+
+// defaultSystemPromptPath returns ~/.litegent/system.md, the system
+// prompt used when -s/--system is omitted and that file exists.
+func defaultSystemPromptPath() (string, error) {
+	dir, err := defaultLitegentDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, defaultSystemPromptFileName), nil
+}
 
 // cliArgs holds parsed command-line flags.
 type cliArgs struct {
@@ -97,12 +142,12 @@ func parseArgs(argv []string) (*cliArgs, error) {
 	fs.SetOutput(io.Discard)
 
 	args := &cliArgs{}
-	fs.StringVar(&args.systemPath, "s", "", "path to system prompt file (optional)")
-	fs.StringVar(&args.systemPath, "system", "", "path to system prompt file (optional)")
+	fs.StringVar(&args.systemPath, "s", "", "path to system prompt file (default: ~/.litegent/system.md)")
+	fs.StringVar(&args.systemPath, "system", "", "path to system prompt file (default: ~/.litegent/system.md)")
 	fs.StringVar(&args.promptPath, "p", "", "path to task prompt file")
 	fs.StringVar(&args.promptPath, "prompt", "", "path to task prompt file")
-	fs.StringVar(&args.configPath, "c", "", "path to JSON config file")
-	fs.StringVar(&args.configPath, "config", "", "path to JSON config file")
+	fs.StringVar(&args.configPath, "c", "", "path to JSON config file (default: ~/.litegent/config.json)")
+	fs.StringVar(&args.configPath, "config", "", "path to JSON config file (default: ~/.litegent/config.json)")
 	fs.StringVar(&args.skillsPath, "k", "", "path to skills directory")
 	fs.StringVar(&args.skillsPath, "skills", "", "path to skills directory")
 	fs.BoolVar(&args.verbose, "v", false, "enable verbose output")
@@ -147,25 +192,35 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if !args.interactive && args.promptPath == "" {
 		missing = append(missing, "-p/--prompt")
 	}
-	if args.configPath == "" {
-		missing = append(missing, "-c/--config")
-	}
 	if len(missing) > 0 {
 		fmt.Fprintf(stderr, "litegent: missing required flag(s): %v\n\n%s", missing, usage)
 		return ExitConfigOrCLIError
 	}
 
-	// -s/--system is optional: when omitted, run with a minimal built-in
-	// prompt rather than forcing every invocation to supply a file.
+	// Resolve the system prompt: an explicit -s always wins; otherwise
+	// use ~/.litegent/system.md when present; otherwise fall back to the
+	// built-in minimal prompt.
 	systemPrompt := defaultSystemPrompt
-	if args.systemPath != "" {
-		systemBytes, err := os.ReadFile(args.systemPath)
-		if err != nil {
-			fmt.Fprintf(stderr, "litegent: reading system prompt: %v\n", err)
+	systemPath := args.systemPath
+	if systemPath == "" {
+		if path, pathErr := defaultSystemPromptPath(); pathErr == nil {
+			if _, statErr := os.Stat(path); statErr == nil {
+				systemPath = path
+			} else if !errors.Is(statErr, fs.ErrNotExist) {
+				fmt.Fprintf(stderr, "litegent: checking default system prompt %s: %v\n", path, statErr)
+				return ExitConfigOrCLIError
+			}
+		}
+	}
+	if systemPath != "" {
+		systemBytes, readErr := os.ReadFile(systemPath)
+		if readErr != nil {
+			fmt.Fprintf(stderr, "litegent: reading system prompt: %v\n", readErr)
 			return ExitConfigOrCLIError
 		}
 		systemPrompt = string(systemBytes)
 	}
+
 	var promptBytes []byte
 	if !args.interactive {
 		promptBytes, err = os.ReadFile(args.promptPath)
@@ -174,7 +229,30 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return ExitConfigOrCLIError
 		}
 	}
-	cfg, err := config.Load(args.configPath)
+
+	// Resolve the config path: -c wins; otherwise use
+	// ~/.litegent/config.json. A missing default file is reported as a
+	// clear, actionable error rather than silently running with defaults.
+	configPath := args.configPath
+	if configPath == "" {
+		path, pathErr := defaultConfigPath()
+		if pathErr != nil {
+			fmt.Fprintf(stderr, "litegent: resolving default config path: %v\n", pathErr)
+			return ExitConfigOrCLIError
+		}
+		configPath = path
+		if _, statErr := os.Stat(configPath); errors.Is(statErr, fs.ErrNotExist) {
+			fmt.Fprintf(stderr,
+				"litegent: no config supplied and no default config found at %s; pass -c/--config or create the file\n",
+				configPath,
+			)
+			return ExitConfigOrCLIError
+		} else if statErr != nil {
+			fmt.Fprintf(stderr, "litegent: checking default config %s: %v\n", configPath, statErr)
+			return ExitConfigOrCLIError
+		}
+	}
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "litegent: loading config: %v\n", err)
 		return ExitConfigOrCLIError

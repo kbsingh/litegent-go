@@ -52,7 +52,7 @@ Modern AI coding and operations agents often suffer from:
   
 - **FR-1.2: System Prompt File (`-s, --system`)**  
   - Shall accept an optional path pointing to a readable file containing the system prompt.
-  - When the flag is omitted, Litegent must use the built-in default system prompt (see `req/user_guide.md`).
+  - When the flag is omitted, Litegent must use `~/.litegent/system.md` if it exists, falling back to the built-in default system prompt (quoted in `req/user_guide.md` Section 5.1) otherwise.
   - If the flag is provided but the file does not exist or is not readable, Litegent must exit immediately with an error message and exit code `1`.
 
 - **FR-1.3: User Prompt File (`-p, --prompt`)**  
@@ -60,8 +60,9 @@ Modern AI coding and operations agents often suffer from:
   - If the file does not exist or is not readable, Litegent must exit immediately with an error message and exit code `1`.
 
 - **FR-1.4: Configuration File (`-c, --config`)**  
-  - Must accept a mandatory path pointing to a valid JSON configuration file.
-  - If the file syntax is invalid or required fields are missing, Litegent must exit immediately with a descriptive schema validation error and exit code `1`.
+  - Shall accept an optional path pointing to a valid JSON configuration file.
+  - When the flag is omitted, Litegent must use `~/.litegent/config.json`.
+  - If the resolved file does not exist, cannot be read, has invalid syntax, or has missing/invalid required fields, Litegent must exit immediately with a descriptive error and exit code `1`.
 
 - **FR-1.5: Skills Directory (`-k, --skills`)**  
   - Shall accept an optional path pointing to a directory containing skill documentation files.
@@ -83,7 +84,7 @@ Modern AI coding and operations agents often suffer from:
 
 - **FR-2.1: Loop Initialization**  
   In single-shot mode (no `-i`), the agent must initialize the dialogue context with:
-  1. System message containing the content from `-s` (or the built-in default prompt when `-s` is omitted), augmented by loaded skills from `-k` (if provided).
+  1. System message containing the content from `-s`, augmented by loaded skills from `-k` (if provided).
   2. User message containing the content from `-p`.
 
   In interactive mode (`-i`), initialization instead seeds only the system message; the first (and every subsequent) user message is appended per turn as it's read from stdin — see FR-7.1.

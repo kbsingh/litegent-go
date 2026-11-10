@@ -13,7 +13,7 @@
 
 Litegent requires **zero external servers or MCP daemons**—all tools are built-in and executed locally under your user permissions.
 
-> **⚠ Litegent is intentionally unconfined.** It does not sandbox itself to the current directory: `bash`, `read_file`, `write_file`, `edit_file`, and the search tools can touch anything your user account can touch, anywhere on the machine. There is no path jail. The system prompt you supply via `-s` is the real behavioral boundary, and the dual logs (Section 7) are your audit trail of exactly what it did. If you omit `-s`, Litegent falls back to the built-in default system prompt (quoted in Section 5.1) Run it as a user whose privileges you're comfortable granting to an autonomous agent, and review the logs after each run.
+> **⚠ Litegent is intentionally unconfined.** It does not sandbox itself to the current directory: `bash`, `read_file`, `write_file`, `edit_file`, and the search tools can touch anything your user account can touch, anywhere on the machine. There is no path jail. The system prompt you supply via `-s` is the real behavioral boundary, and the dual logs (Section 7) are your audit trail of exactly what it did. Run it as a user whose privileges you're comfortable granting to an autonomous agent, and review the logs after each run.
 
 ---
 
@@ -57,22 +57,22 @@ Use `install.sh` instead when you want the full vet/test gate and a shippable st
 Litegent is executed from the terminal using clear file-based parameters:
 
 ```bash
-litegent [-s <system_prompt_file>] -p <user_prompt_file> -c <config_file> [-k <skills_directory>] [-v]
+litegent [-s <system_prompt_file>] -p <user_prompt_file> [-c <config_file>] [-k <skills_directory>] [-v]
 ```
 
 Or, for a persistent, multi-turn session (see Section 5.4):
 
 ```bash
-litegent [-s <system_prompt_file>] -i -c <config_file> [-k <skills_directory>] [-v]
+litegent [-s <system_prompt_file>] -i [-c <config_file>] [-k <skills_directory>] [-v]
 ```
 
 ### Argument Descriptions
 
 | Flag | Full Name | Required? | Description |
 |---|---|---|---|
-| `-s` | `--system` | No | Path to the file containing the system prompt (agent role, principles, constraints). When omitted, Litegent uses the built-in default system prompt (see Section 5.1). |
+| `-s` | `--system` | No | Path to the file containing the system prompt (agent role, principles, constraints). Defaults to `~/.litegent/system.md` when present, otherwise the built-in default system prompt (see Section 5.1). |
 | `-p` | `--prompt` | Yes, unless `-i` is set | Path to the file containing the execution prompt (task instructions, requirements). Conflicts with `-i`. |
-| `-c` | `--config` | **Yes** | Path to the JSON configuration file (`.json`). |
+| `-c` | `--config` | No | Path to the JSON configuration file (`.json`). Defaults to `~/.litegent/config.json`. |
 | `-k` | `--skills` | No | Path to a directory containing skill Markdown files (`*.md`) to inject into context. |
 | `-i` | `--interactive` | No | Run a persistent, multi-turn session, reading task prompts from stdin instead of `-p`. |
 | `-v` | `--verbose`| No | Stream live progress to stderr as the loop runs (see Section 5.5). |
@@ -87,6 +87,16 @@ On success, the agent's final response is printed to stdout followed by a `----=
 ## 4. Configuration Guide
 
 Litegent accepts **JSON configuration files only**. Environment variables matching `${VAR_NAME}` or `${VAR_NAME:-default}` are automatically interpolated at runtime.
+
+When `-c` is omitted, Litegent reads `~/.litegent/config.json`. When `-s` is omitted, it reads `~/.litegent/system.md` if that file exists, otherwise it uses the built-in default system prompt (quoted in Section 5.1). Explicit flags always take precedence. Put your durable defaults in `~/.litegent/`:
+
+```text
+~/.litegent/
+├── config.json   # default configuration (used when -c is omitted)
+└── system.md     # default system prompt (used when -s is omitted)
+```
+
+If `-c` is omitted and `~/.litegent/config.json` does not exist, Litegent exits with an error naming that path so the fix is obvious.
 
 ### Complete JSON Configuration Example (`config.json`)
 ```json
@@ -139,11 +149,9 @@ A few notes on the thinking settings:
 ## 5. Working with Roles, Prompts & Skills
 
 ### 5.1 Role-Based System Prompts (`-s`)
-If `-s` is omitted, Litegent runs with the built-in prompt:
+If neither `-s` nor `~/.litegent/system.md` supplies a prompt, Litegent runs with the built-in prompt:
 
 > you are a helpful, considerate, highly experienced technical assistant. Always confirm, make backups before making changes, remove ambiguity by asking questions, never go beyond the request - stay focused. But when issues and opportunities are discovered, recommend followup actions; when possible consult docs
-
-Pass `-s` whenever you want a specific role, behavioral rules, or safety boundaries.
 
 Litegent comes with ready-to-use role templates located in `examples/roles/`:
 
