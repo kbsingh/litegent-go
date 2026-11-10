@@ -194,7 +194,9 @@ Litegent shall provide native Go implementations of the following core tools:
     </skill>
   </available_skills>
   ```
-- **FR-5.3: Prompt Augmentation**  
+- **FR-5.3: Content Validation**  
+  Each Markdown file must be validated before assembly. Any occurrence of the catalog's reserved wrapper tags (`<skill>`, `</skill>`, `<available_skills>`, `</available_skills>`, case-insensitive) must cause a descriptive load error rather than being embedded verbatim, so a misplaced XML fragment cannot corrupt the generated catalog. Attribute values (title, path) must be XML-escaped.
+- **FR-5.4: Prompt Augmentation**  
   The assembled skills block must be seamlessly injected into the initial system prompt before loop initiation.
 
 ---

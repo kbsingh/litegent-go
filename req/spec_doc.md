@@ -564,7 +564,9 @@ When a summarization call is made, it covers the newly evicted messages plus any
 - Returns an error if `skillsDir` doesn't exist or isn't a directory.
 - `filepath.WalkDir(skillsDir, ...)`, matching files whose lowercased name ends in `.md`.
 - Extracts the title from the first line matching `# <Title>` (via a line-by-line scan with `bufio.Scanner`); falls back to the filename if no such heading exists.
-- Assembles `<available_skills>\n  <skill name=%q file=%q>\n<full file content>\n  </skill>\n...\n</available_skills>` — one `<skill>` block per discovered file, in filesystem walk order.
+- Validates each file before embedding it: content containing the catalog's own wrapper tags (`<skill>`, `</skill>`, `<available_skills>`, `</available_skills>`, case-insensitive, whitespace-tolerant) is rejected with a descriptive error, so a misplaced XML fragment cannot close or reopen the catalog and corrupt subsequent skills. Ordinary angle-bracket placeholder text such as `<dir>` is allowed.
+- Escapes skill titles and paths for XML attributes, so quotes or ampersands in a filename cannot terminate an attribute early.
+- Assembles `<available_skills>\n  <skill name="..." file="...">\n<full file content>\n  </skill>\n...\n</available_skills>` — one `<skill>` block per discovered file, in filesystem walk order.
 - Returns `("", nil)` (empty string, no error) if zero `.md` files were found, so callers can skip injection entirely.
 
 `internal/cliapp.Run` appends the result (if non-empty) to the system prompt text with a `"\n\n"` separator before passing it to the agent.

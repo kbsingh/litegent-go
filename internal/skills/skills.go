@@ -7,11 +7,21 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"html"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+// reservedSkillTag matches the XML wrapper tags that BuildSkillsPrompt
+// itself emits. Skill file content is embedded verbatim inside
+// <available_skills>, so allowing these sequences through would let a
+// single file close (or reopen) the catalog and corrupt every skill that
+// follows. The pattern is case-insensitive and tolerant of whitespace
+// between "<", "/", and the tag name.
+var reservedSkillTag = regexp.MustCompile(`(?i)<\s*/?\s*(?:available_skills|skill)\b`)
 
 // BuildSkillsPrompt recursively discovers all *.md files under skillsDir
 // and assembles them into an <available_skills> XML block. Litegent is
@@ -41,8 +51,12 @@ func BuildSkillsPrompt(skillsDir string) (string, error) {
 		if err != nil {
 			return fmt.Errorf("reading skill file %q: %w", path, err)
 		}
+		if err := validateSkillContent(path, content); err != nil {
+			return err
+		}
 		title := extractTitle(content, d.Name())
-		fmt.Fprintf(&sb, "  <skill name=%q file=%q>\n%s\n  </skill>\n", title, path, string(content))
+		fmt.Fprintf(&sb, "  <skill name=\"%s\" file=\"%s\">\n%s\n  </skill>\n",
+			xmlEscapeAttr(title), xmlEscapeAttr(path), string(content))
 		count++
 		return nil
 	})
@@ -56,6 +70,32 @@ func BuildSkillsPrompt(skillsDir string) (string, error) {
 		return "", nil
 	}
 	return sb.String(), nil
+}
+
+// validateSkillContent rejects any skill file that contains one of the
+// catalog's own wrapper tags. This is the guard that keeps a stray or
+// malicious "</skill>" (or "<available_skills>") in a Markdown file from
+// prematurely closing the generated XML block and corrupting the prompt.
+// Ordinary angle-bracket text such as "<dir>" is allowed: it is inert
+// placeholder text, not a catalog wrapper tag.
+func validateSkillContent(path string, content []byte) error {
+	for i, line := range strings.Split(string(content), "\n") {
+		if loc := reservedSkillTag.FindStringIndex(line); loc != nil {
+			return fmt.Errorf(
+				"skill file %q line %d: reserved XML tag %q is not allowed in skill content",
+				path, i+1, line[loc[0]:loc[1]],
+			)
+		}
+	}
+	return nil
+}
+
+// xmlEscapeAttr escapes a value for safe inclusion inside a double-quoted
+// XML attribute. Skill titles and paths come from the filesystem, so a
+// quote or ampersand in either must not be able to terminate the
+// attribute early and break the catalog structure.
+func xmlEscapeAttr(s string) string {
+	return html.EscapeString(s)
 }
 
 // extractTitle returns the text of the first level-1 Markdown heading
