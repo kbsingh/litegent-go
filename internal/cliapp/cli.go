@@ -45,14 +45,23 @@ const (
 // transcript. It is presentation only — never added to history.
 const turnSeparator = "----====----"
 
+// defaultSystemPrompt is used when no -s/--system file is supplied. It
+// sets baseline expectations for confirmation, backups, clarifying
+// questions, scope discipline, and follow-up recommendations; callers
+// that need a specific role should provide their own prompt file.
+const defaultSystemPrompt = "you are a helpful, considerate, highly experienced technical assistant. " +
+	"Always confirm, make backups before making changes, remove ambiguity by asking questions, " +
+	"never go beyond the request - stay focused. But when issues and opportunities are discovered, " +
+	"recommend followup actions; when possible consult docs"
+
 const usage = `litegent - an autonomous, unconfined CLI AI agent for Linux
 
 Usage:
-  litegent -s <system_prompt_file> -p <user_prompt_file> -c <config_file> [-k <skills_directory>] [-v]
-  litegent -s <system_prompt_file> -i -c <config_file> [-k <skills_directory>] [-v]
+  litegent [-s <system_prompt_file>] -p <user_prompt_file> -c <config_file> [-k <skills_directory>] [-v]
+  litegent [-s <system_prompt_file>] -i -c <config_file> [-k <skills_directory>] [-v]
 
 Flags:
-  -s, --system PATH   Path to the system prompt file (required)
+  -s, --system PATH   Path to the system prompt file (optional; defaults to a built-in prompt)
   -p, --prompt PATH   Path to the task prompt file (required unless -i is set)
   -c, --config PATH   Path to the JSON config file (required)
   -k, --skills PATH   Path to a directory of skill Markdown files (optional)
@@ -88,8 +97,8 @@ func parseArgs(argv []string) (*cliArgs, error) {
 	fs.SetOutput(io.Discard)
 
 	args := &cliArgs{}
-	fs.StringVar(&args.systemPath, "s", "", "path to system prompt file")
-	fs.StringVar(&args.systemPath, "system", "", "path to system prompt file")
+	fs.StringVar(&args.systemPath, "s", "", "path to system prompt file (optional)")
+	fs.StringVar(&args.systemPath, "system", "", "path to system prompt file (optional)")
 	fs.StringVar(&args.promptPath, "p", "", "path to task prompt file")
 	fs.StringVar(&args.promptPath, "prompt", "", "path to task prompt file")
 	fs.StringVar(&args.configPath, "c", "", "path to JSON config file")
@@ -135,9 +144,6 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	var missing []string
-	if args.systemPath == "" {
-		missing = append(missing, "-s/--system")
-	}
 	if !args.interactive && args.promptPath == "" {
 		missing = append(missing, "-p/--prompt")
 	}
@@ -149,10 +155,16 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return ExitConfigOrCLIError
 	}
 
-	systemBytes, err := os.ReadFile(args.systemPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "litegent: reading system prompt: %v\n", err)
-		return ExitConfigOrCLIError
+	// -s/--system is optional: when omitted, run with a minimal built-in
+	// prompt rather than forcing every invocation to supply a file.
+	systemPrompt := defaultSystemPrompt
+	if args.systemPath != "" {
+		systemBytes, err := os.ReadFile(args.systemPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "litegent: reading system prompt: %v\n", err)
+			return ExitConfigOrCLIError
+		}
+		systemPrompt = string(systemBytes)
 	}
 	var promptBytes []byte
 	if !args.interactive {
@@ -168,7 +180,6 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return ExitConfigOrCLIError
 	}
 
-	systemPrompt := string(systemBytes)
 	if args.skillsPath != "" {
 		if _, statErr := os.Stat(args.skillsPath); statErr != nil {
 			fmt.Fprintf(stderr, "litegent: skills directory: %v\n", statErr)
