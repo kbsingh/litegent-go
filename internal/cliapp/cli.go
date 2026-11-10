@@ -63,7 +63,7 @@ Usage:
 Flags:
   -s, --system PATH   Path to the system prompt file (optional; defaults to a built-in prompt)
   -p, --prompt PATH   Path to the task prompt file (required unless -i is set)
-  -c, --config PATH   Path to the JSON or YAML config file (required)
+  -c, --config PATH   Path to the JSON config file (required)
   -k, --skills PATH   Path to a directory of skill Markdown files (optional)
   -i, --interactive   Read repeated task prompts from stdin; conflicts with -p
   -v, --verbose       Enable verbose progress output to stderr as the loop runs
@@ -101,8 +101,8 @@ func parseArgs(argv []string) (*cliArgs, error) {
 	fs.StringVar(&args.systemPath, "system", "", "path to system prompt file (optional)")
 	fs.StringVar(&args.promptPath, "p", "", "path to task prompt file")
 	fs.StringVar(&args.promptPath, "prompt", "", "path to task prompt file")
-	fs.StringVar(&args.configPath, "c", "", "path to JSON/YAML config file")
-	fs.StringVar(&args.configPath, "config", "", "path to JSON/YAML config file")
+	fs.StringVar(&args.configPath, "c", "", "path to JSON config file")
+	fs.StringVar(&args.configPath, "config", "", "path to JSON config file")
 	fs.StringVar(&args.skillsPath, "k", "", "path to skills directory")
 	fs.StringVar(&args.skillsPath, "skills", "", "path to skills directory")
 	fs.BoolVar(&args.verbose, "v", false, "enable verbose output")

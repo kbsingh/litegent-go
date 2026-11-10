@@ -11,7 +11,7 @@
 Litegent takes a system prompt and a configuration file, plus either a one-shot task prompt or an interactive session flag, and an optional skills directory:
 1. **`-s <file>`** *(optional)*: System prompt defining the agent's role, behavioral principles, and operating constraints. When omitted, the built-in default system prompt is used (quoted in `req/user_guide.md`).
 2. **`-p <file>`**: Task prompt for a single, non-interactive run. Required unless `-i` is set.
-3. **`-c <file>`**: Configuration file (JSON or YAML) defining model parameters, timeouts, logging settings, and context controls. (Always required.)
+3. **`-c <file>`**: JSON configuration file defining model parameters, timeouts, logging settings, and context controls. (Always required.)
 4. **`-i`** *(optional)*: Run a persistent, multi-turn interactive session instead — task prompts are read one line at a time from stdin until `/exit`, `/quit`, or EOF. Conflicts with `-p`.
 5. **`-k <dir>`** *(optional)*: Skills directory containing Markdown files with domain runbooks, procedures, and guidelines, injected into the system prompt.
 6. **`-v`** *(optional)*: Stream live, human-facing progress to stderr as the loop runs, in addition to the files below.

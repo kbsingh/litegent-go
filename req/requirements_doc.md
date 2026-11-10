@@ -60,7 +60,7 @@ Modern AI coding and operations agents often suffer from:
   - If the file does not exist or is not readable, Litegent must exit immediately with an error message and exit code `1`.
 
 - **FR-1.4: Configuration File (`-c, --config`)**  
-  - Must accept a mandatory path pointing to a valid configuration file formatted in either JSON or YAML.
+  - Must accept a mandatory path pointing to a valid JSON configuration file.
   - If the file syntax is invalid or required fields are missing, Litegent must exit immediately with a descriptive schema validation error and exit code `1`.
 
 - **FR-1.5: Skills Directory (`-k, --skills`)**  
@@ -195,7 +195,9 @@ Litegent shall provide native Go implementations of the following core tools:
     </skill>
   </available_skills>
   ```
-- **FR-5.3: Prompt Augmentation**  
+- **FR-5.3: Content Validation**  
+  Each Markdown file must be validated before assembly. Any occurrence of the catalog's reserved wrapper tags (`<skill>`, `</skill>`, `<available_skills>`, `</available_skills>`, case-insensitive) must cause a descriptive load error rather than being embedded verbatim, so a misplaced XML fragment cannot corrupt the generated catalog. Attribute values (title, path) must be XML-escaped.
+- **FR-5.4: Prompt Augmentation**  
   The assembled skills block must be seamlessly injected into the initial system prompt before loop initiation.
 
 ---
