@@ -9,9 +9,9 @@
 ## What Litegent Does (In Brief)
 
 Litegent takes an optional system prompt and configuration file (with sensible defaults under `~/.litegent/`), plus either a one-shot task prompt or an interactive session flag, and an optional skills directory:
-1. **`-s <file>`** *(optional)*: System prompt defining the agent's role, behavioral principles, and operating constraints. Defaults to `~/.litegent/system.md` when present, otherwise the built-in default system prompt (quoted in `req/user_guide.md`).
+1. **`-s <file>`** *(optional)*: System prompt defining the agent's role, behavioral principles, and operating constraints. Defaults to `~/.litegent/system.md`; if that file is absent, Litegent creates it with the built-in default system prompt (quoted in `req/user_guide.md`).
 2. **`-p <file>`**: Task prompt for a single, non-interactive run. Required unless `-i` is set.
-3. **`-c <file>`** *(optional)*: JSON configuration file defining model parameters, timeouts, logging settings, and context controls. Defaults to `~/.litegent/config.json`.
+3. **`-c <file>`** *(optional)*: JSON configuration file defining model parameters, timeouts, logging settings, and context controls. Defaults to `~/.litegent/config.json`; if that file is absent, Litegent creates it with documented example values.
 4. **`-i`** *(optional)*: Run a persistent, multi-turn interactive session instead — task prompts are read one line at a time from stdin until `/exit`, `/quit`, or EOF. Conflicts with `-p`.
 5. **`-k <dir>`** *(optional)*: Skills directory containing Markdown files with domain runbooks, procedures, and guidelines, injected into the system prompt.
 6. **`-v`** *(optional)*: Stream live, human-facing progress to stderr as the loop runs, in addition to the files below.

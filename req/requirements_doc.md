@@ -52,7 +52,7 @@ Modern AI coding and operations agents often suffer from:
   
 - **FR-1.2: System Prompt File (`-s, --system`)**  
   - Shall accept an optional path pointing to a readable file containing the system prompt.
-  - When the flag is omitted, Litegent must use `~/.litegent/system.md` if it exists, falling back to the built-in default system prompt (quoted in `req/user_guide.md` Section 5.1) otherwise.
+  - When the flag is omitted, Litegent must create `~/.litegent/system.md` (and its parent directory) with the built-in default system prompt if the file does not exist, then load it. The built-in prompt is quoted in `req/user_guide.md` Section 5.1. An existing file must never be overwritten.
   - If the flag is provided but the file does not exist or is not readable, Litegent must exit immediately with an error message and exit code `1`.
 
 - **FR-1.3: User Prompt File (`-p, --prompt`)**  
@@ -61,8 +61,8 @@ Modern AI coding and operations agents often suffer from:
 
 - **FR-1.4: Configuration File (`-c, --config`)**  
   - Shall accept an optional path pointing to a valid JSON configuration file.
-  - When the flag is omitted, Litegent must use `~/.litegent/config.json`.
-  - If the resolved file does not exist, cannot be read, has invalid syntax, or has missing/invalid required fields, Litegent must exit immediately with a descriptive error and exit code `1`.
+  - When the flag is omitted, Litegent must use `~/.litegent/config.json`. If that file does not exist, Litegent must create it (and its parent directory) with the documented example values, using `${OPENAI_API_KEY}` as the API-key placeholder, then proceed.
+  - If an explicitly supplied file does not exist, or the resolved file cannot be read, has invalid syntax, or has missing/invalid required fields, Litegent must exit immediately with a descriptive error and exit code `1`.
 
 - **FR-1.5: Skills Directory (`-k, --skills`)**  
   - Shall accept an optional path pointing to a directory containing skill documentation files.

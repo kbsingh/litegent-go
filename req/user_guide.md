@@ -70,7 +70,7 @@ litegent [-s <system_prompt_file>] -i [-c <config_file>] [-k <skills_directory>]
 
 | Flag | Full Name | Required? | Description |
 |---|---|---|---|
-| `-s` | `--system` | No | Path to the file containing the system prompt (agent role, principles, constraints). Defaults to `~/.litegent/system.md` when present, otherwise the built-in default system prompt (see Section 5.1). |
+| `-s` | `--system` | No | Path to the file containing the system prompt (agent role, principles, constraints). Defaults to `~/.litegent/system.md`; if that file is absent, Litegent creates it with the built-in default system prompt (see Section 5.1). |
 | `-p` | `--prompt` | Yes, unless `-i` is set | Path to the file containing the execution prompt (task instructions, requirements). Conflicts with `-i`. |
 | `-c` | `--config` | No | Path to the JSON configuration file (`.json`). Defaults to `~/.litegent/config.json`. |
 | `-k` | `--skills` | No | Path to a directory containing skill Markdown files (`*.md`) to inject into context. |
@@ -88,15 +88,15 @@ On success, the agent's final response is printed to stdout followed by a `----=
 
 Litegent accepts **JSON configuration files only**. Environment variables matching `${VAR_NAME}` or `${VAR_NAME:-default}` are automatically interpolated at runtime.
 
-When `-c` is omitted, Litegent reads `~/.litegent/config.json`. When `-s` is omitted, it reads `~/.litegent/system.md` if that file exists, otherwise it uses the built-in default system prompt (quoted in Section 5.1). Explicit flags always take precedence. Put your durable defaults in `~/.litegent/`:
+When `-c` is omitted, Litegent reads `~/.litegent/config.json`. When `-s` is omitted, it reads `~/.litegent/system.md`; if that file does not exist, Litegent creates it with the built-in default system prompt (quoted in Section 5.1). Explicit flags always take precedence. Put your durable defaults in `~/.litegent/`:
 
 ```text
 ~/.litegent/
 ├── config.json   # default configuration (used when -c is omitted)
-└── system.md     # default system prompt (used when -s is omitted)
+└── system.md     # default system prompt (created on first run if absent)
 ```
 
-If `-c` is omitted and `~/.litegent/config.json` does not exist, Litegent exits with an error naming that path so the fix is obvious.
+If `-c` is omitted and `~/.litegent/config.json` does not exist, Litegent creates it (and `~/.litegent/` itself) with the documented example values, then continues. The generated file uses `"${OPENAI_API_KEY}"` as its API-key placeholder, so no real credential is written, and an existing config is never overwritten. Likewise, if `-s` is omitted and `~/.litegent/system.md` does not exist, Litegent writes the built-in default prompt there. Litegent prints a one-line notice to stderr when it creates either file.
 
 ### Complete JSON Configuration Example (`config.json`)
 ```json
@@ -149,7 +149,7 @@ A few notes on the thinking settings:
 ## 5. Working with Roles, Prompts & Skills
 
 ### 5.1 Role-Based System Prompts (`-s`)
-If neither `-s` nor `~/.litegent/system.md` supplies a prompt, Litegent runs with the built-in prompt:
+If `-s` is omitted, Litegent uses `~/.litegent/system.md`, creating it with the built-in prompt if absent:
 
 > you are a helpful, considerate, highly experienced technical assistant. Always confirm, make backups before making changes, remove ambiguity by asking questions, never go beyond the request - stay focused. But when issues and opportunities are discovered, recommend followup actions; when possible consult docs
 

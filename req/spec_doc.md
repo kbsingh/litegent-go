@@ -87,7 +87,7 @@ Go idiom: `cmd/litegent/main.go` is a single statement — `os.Exit(cliapp.Run(o
 litegent [-h] [--version] [-s SYSTEM] -p PROMPT [-c CONFIG] [-k SKILLS] [-v]
 litegent [-h] [--version] [-s SYSTEM] -i [-c CONFIG] [-k SKILLS] [-v]
 ```
-- `-s, --system PATH`: Path to system prompt text file. (Optional; defaults to `~/.litegent/system.md` when present, otherwise the built-in default system prompt — quoted in `req/user_guide.md` Section 5.1.)
+- `-s, --system PATH`: Path to system prompt text file. (Optional; defaults to `~/.litegent/system.md`, which is created with the built-in default system prompt when absent — quoted in `req/user_guide.md` Section 5.1.)
 - `-p, --prompt PATH`: Path to task prompt text file. (Mandatory unless `-i` is set; conflicts with `-i`)
 - `-c, --config PATH`: Path to JSON config file. (Optional; defaults to `~/.litegent/config.json`)
 - `-k, --skills PATH`: Path to directory of skill Markdown files. (Optional)
@@ -98,14 +98,14 @@ litegent [-h] [--version] [-s SYSTEM] -i [-c CONFIG] [-k SKILLS] [-v]
 
 Flags are parsed with the standard library `flag` package, not a third-party CLI library: `internal/cliapp.parseArgs` registers each short/long pair (`-s`/`--system`, `-p`/`--prompt`, `-c`/`--config`, `-k`/`--skills`, `-v`/`--verbose`, `-i`/`--interactive`, `-h`/`--help`) twice against the same backing struct field via `flag.FlagSet.StringVar`/`BoolVar`, because stdlib `flag` already treats `-x` and `--x` identically — no external CLI-parsing dependency is needed. `--version` is registered once (it has no short form). The flag set uses `flag.ContinueOnError` with output discarded (`fs.SetOutput(io.Discard)`); `Run` prints its own usage text on a parse error.
 
-Validation order in `Run`: (1) parse flags, (2) handle `-h`/`--version` early-exit, (3) reject `-i` + `-p` together, (4) check required flags (`-p` only if `!interactive`) and report any missing flag, (5) resolve the system prompt (`-s`, else `~/.litegent/system.md` if present, else the built-in default) and read it, (6) read the task prompt file (skipped if `-i`), (7) resolve the config path (`-c`, else `~/.litegent/config.json`) and load/validate it, (8) stat + load the skills directory if `-k` was given, (9) construct the logger, tool registry, LLM client, context manager, progress reporter, and `agent.Agent`, (10) run the agentic loop (single-shot or interactive) under a `signal.NotifyContext`-derived cancellable context.
+Validation order in `Run`: (1) parse flags, (2) handle `-h`/`--version` early-exit, (3) reject `-i` + `-p` together, (4) check required flags (`-p` only if `!interactive`) and report any missing flag, (5) resolve the system prompt (`-s`, else `~/.litegent/system.md`, creating that default file with the built-in prompt when absent) and read it, (6) read the task prompt file (skipped if `-i`), (7) resolve the config path (`-c`, else `~/.litegent/config.json`, creating that default file when absent) and load/validate it, (8) stat + load the skills directory if `-k` was given, (9) construct the logger, tool registry, LLM client, context manager, progress reporter, and `agent.Agent`, (10) run the agentic loop (single-shot or interactive) under a `signal.NotifyContext`-derived cancellable context.
 
 #### Default Configuration Directory
 `~/.litegent/` is the conventional home for durable per-user configuration:
-- `system.md`: default system prompt, used when `-s` is omitted and the file exists.
+- `system.md`: default system prompt. When `-s` is omitted and the file is absent, it is created with the built-in default prompt; an existing file is never overwritten.
 - `config.json`: default configuration, used when `-c` is omitted.
 
-An explicit flag always wins. If `-c` is omitted and `~/.litegent/config.json` does not exist, `Run` exits with code `1` and an actionable error naming the expected path. The directory is a convention, not an access boundary: Litegent remains unconfined and accepts flag-supplied paths anywhere on the host.
+An explicit flag always wins. If `-c` is omitted and `~/.litegent/config.json` does not exist, `Run` creates the directory and file with the documented example values, prints a one-line notice to stderr, and continues. The generated file uses `${OPENAI_API_KEY}` as its API-key placeholder, never a real credential, and an existing file is never overwritten. The directory is a convention, not an access boundary: Litegent remains unconfined and accepts flag-supplied paths anywhere on the host.
 
 ##### 2.1.1 Interactive Mode (`-i`)
 
@@ -235,6 +235,11 @@ func Default() LitegentConfig {
 ```
 
 `Validate() error` rejects an empty `BaseURL` or `Model`, a non-positive `MaxSteps`, a negative `MaxRepeatedToolCalls`, and — only when `ManageContext` is true — a non-positive `MaxContextTokens` or `MaxToolOutputChars` or `WindowSize`. It also rejects, but only when thinking is active, a `ThinkingFormat` other than `"reasoning_effort"` or `"thinking"` (an empty format means the `"reasoning_effort"` default). The level itself is never validated: `ThinkingLevel` is free text passed through verbatim, and `(LitegentConfig) ThinkingActive() bool` reports whether it carries an explicit non-`"default"` value that must be sent. A `(LitegentConfig) MaskedAPIKey() string` helper renders `<first 3 chars>...<last 4 chars>`, preserving the key's own stub prefix (e.g. `sk-...wxyz`, `r9_...wxyz`); keys of 7 characters or fewer are masked entirely (`****`), since a 3+4 character reveal would expose the whole key. Callers use it anywhere a key must be shown without leaking it.
+
+#### Default File Generation
+`DefaultJSON() ([]byte, error)` renders the documented defaults as indented JSON with `api_key` set to the literal placeholder `${OPENAI_API_KEY}` — never the caller's environment-resolved secret. `EnsureDefaultConfig(path) (created bool, err error)` creates the parent directory and writes the file with `O_CREATE|O_EXCL` when absent, returning `created=true` only for the process that won the creation race. Existing files are never overwritten.
+
+In `internal/cliapp`, `ensureDefaultSystemPrompt(path, content)` applies the same create-if-absent/O_EXCL discipline to `~/.litegent/system.md`, writing the built-in prompt text. A successful first-run creation is reported with a one-line stderr notice.
 
 #### Environment Variable Interpolation
 Configuration files can include strings matching `${ENV_VAR}` or `${ENV_VAR:-default}`. `Load` performs regex substitution on the raw file bytes, then unmarshals the result:
@@ -736,7 +741,7 @@ cliapp.Run(argv, stdin, stdout, stderr) int
      ├─► handle -h / --version (early return)
      ├─► reject -i + -p together
      ├─► check required flags (-p unless -i)
-     ├─► resolve system prompt (-s, ~/.litegent/system.md, or built-in)
+     ├─► resolve system prompt (-s, or ~/.litegent/system.md; created if absent)
      ├─► systemBytes := os.ReadFile(resolvedSystemPath)
      ├─► promptBytes := os.ReadFile(args.promptPath)         // skipped if -i
      ├─► resolve config path (-c or ~/.litegent/config.json)

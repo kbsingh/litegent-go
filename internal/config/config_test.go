@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -168,6 +169,67 @@ func TestLoad_ThinkingFormatNotValidatedWhenInactive(t *testing.T) {
 	path := writeTemp(t, "config.json", `{"thinking_level": "default", "thinking_format": "bogus"}`)
 	if _, err := Load(path); err != nil {
 		t.Fatalf("thinking_format must be ignored when the level is inactive, got: %v", err)
+	}
+}
+
+func TestDefaultJSON_UsesPlaceholderAndLoads(t *testing.T) {
+	data, err := DefaultJSON()
+	if err != nil {
+		t.Fatalf("DefaultJSON returned error: %v", err)
+	}
+	if !strings.Contains(string(data), `"api_key": "${OPENAI_API_KEY}"`) {
+		t.Errorf("expected API-key placeholder in generated config, got: %s", data)
+	}
+	if !strings.Contains(string(data), `"max_steps": 30`) {
+		t.Errorf("expected example max_steps in generated config, got: %s", data)
+	}
+
+	path := writeTemp(t, "config.json", string(data))
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("generated config must load, got: %v", err)
+	}
+	if cfg.Model != "gpt-4o" {
+		t.Errorf("Model = %q, want gpt-4o", cfg.Model)
+	}
+}
+
+func TestEnsureDefaultConfig_CreatesAndPreserves(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".litegent", "config.json")
+
+	created, err := EnsureDefaultConfig(path)
+	if err != nil {
+		t.Fatalf("EnsureDefaultConfig returned error: %v", err)
+	}
+	if !created {
+		t.Fatal("expected created=true for a missing file")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated config: %v", err)
+	}
+	if !strings.Contains(string(data), `"${OPENAI_API_KEY}"`) {
+		t.Errorf("expected API-key placeholder, got: %s", data)
+	}
+
+	const custom = `{"model": "do-not-overwrite"}`
+	if err := os.WriteFile(path, []byte(custom), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	created, err = EnsureDefaultConfig(path)
+	if err != nil {
+		t.Fatalf("EnsureDefaultConfig on existing file returned error: %v", err)
+	}
+	if created {
+		t.Fatal("expected created=false for an existing file")
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != custom {
+		t.Errorf("existing config was overwritten: got %q, want %q", data, custom)
 	}
 }
 

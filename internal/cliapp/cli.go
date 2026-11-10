@@ -74,7 +74,7 @@ Usage:
   litegent [-s <system_prompt_file>] -i [-c <config_file>] [-k <skills_directory>] [-v]
 
 Flags:
-  -s, --system PATH   Path to the system prompt file (default: ~/.litegent/system.md if present, else a built-in prompt)
+  -s, --system PATH   Path to the system prompt file (default: ~/.litegent/system.md, created if absent)
   -p, --prompt PATH   Path to the task prompt file (required unless -i is set)
   -c, --config PATH   Path to the JSON config file (default: ~/.litegent/config.json)
   -k, --skills PATH   Path to a directory of skill Markdown files (optional)
@@ -112,13 +112,50 @@ func defaultConfigPath() (string, error) {
 }
 
 // defaultSystemPromptPath returns ~/.litegent/system.md, the system
-// prompt used when -s/--system is omitted and that file exists.
+// prompt used when -s/--system is omitted.
 func defaultSystemPromptPath() (string, error) {
 	dir, err := defaultLitegentDir()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(dir, defaultSystemPromptFileName), nil
+}
+
+// ensureDefaultSystemPrompt writes content to path when path is absent.
+// It creates the parent directory, never overwrites an existing file, and
+// returns created=true only when this call wrote the file. O_EXCL makes
+// concurrent first runs safe: the loser observes created=false.
+func ensureDefaultSystemPrompt(path, content string) (created bool, err error) {
+	if _, statErr := os.Stat(path); statErr == nil {
+		return false, nil
+	} else if !errors.Is(statErr, fs.ErrNotExist) {
+		return false, fmt.Errorf("checking system prompt %q: %w", path, statErr)
+	}
+
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
+			return false, fmt.Errorf("creating system prompt directory %q: %w", dir, mkErr)
+		}
+	}
+
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("creating default system prompt %q: %w", path, err)
+	}
+
+	if _, err := f.WriteString(content); err != nil {
+		f.Close()
+		os.Remove(path)
+		return false, fmt.Errorf("writing default system prompt %q: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(path)
+		return false, fmt.Errorf("closing default system prompt %q: %w", path, err)
+	}
+	return true, nil
 }
 
 // cliArgs holds parsed command-line flags.
@@ -197,19 +234,23 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return ExitConfigOrCLIError
 	}
 
-	// Resolve the system prompt: an explicit -s always wins; otherwise
-	// use ~/.litegent/system.md when present; otherwise fall back to the
-	// built-in minimal prompt.
+	// Resolve the system prompt: an explicit -s always wins. Otherwise
+	// ensure ~/.litegent/system.md exists (creating it with the built-in
+	// prompt on first run), then load it. If the home directory cannot be
+	// determined, use the compiled-in prompt without touching the disk.
 	systemPrompt := defaultSystemPrompt
 	systemPath := args.systemPath
 	if systemPath == "" {
 		if path, pathErr := defaultSystemPromptPath(); pathErr == nil {
-			if _, statErr := os.Stat(path); statErr == nil {
-				systemPath = path
-			} else if !errors.Is(statErr, fs.ErrNotExist) {
-				fmt.Fprintf(stderr, "litegent: checking default system prompt %s: %v\n", path, statErr)
+			created, ensureErr := ensureDefaultSystemPrompt(path, defaultSystemPrompt)
+			if ensureErr != nil {
+				fmt.Fprintf(stderr, "litegent: preparing default system prompt: %v\n", ensureErr)
 				return ExitConfigOrCLIError
 			}
+			if created {
+				fmt.Fprintf(stderr, "litegent: created default system prompt at %s\n", path)
+			}
+			systemPath = path
 		}
 	}
 	if systemPath != "" {
@@ -231,8 +272,9 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	// Resolve the config path: -c wins; otherwise use
-	// ~/.litegent/config.json. A missing default file is reported as a
-	// clear, actionable error rather than silently running with defaults.
+	// ~/.litegent/config.json, creating it with the documented example
+	// values on first use. The created file uses an ${OPENAI_API_KEY}
+	// placeholder, never a real key.
 	configPath := args.configPath
 	if configPath == "" {
 		path, pathErr := defaultConfigPath()
@@ -241,15 +283,13 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return ExitConfigOrCLIError
 		}
 		configPath = path
-		if _, statErr := os.Stat(configPath); errors.Is(statErr, fs.ErrNotExist) {
-			fmt.Fprintf(stderr,
-				"litegent: no config supplied and no default config found at %s; pass -c/--config or create the file\n",
-				configPath,
-			)
+		created, ensureErr := config.EnsureDefaultConfig(configPath)
+		if ensureErr != nil {
+			fmt.Fprintf(stderr, "litegent: preparing default config: %v\n", ensureErr)
 			return ExitConfigOrCLIError
-		} else if statErr != nil {
-			fmt.Fprintf(stderr, "litegent: checking default config %s: %v\n", configPath, statErr)
-			return ExitConfigOrCLIError
+		}
+		if created {
+			fmt.Fprintf(stderr, "litegent: created default config at %s\n", configPath)
 		}
 	}
 	cfg, err := config.Load(configPath)
