@@ -16,10 +16,8 @@ func writeTemp(t *testing.T, name, content string) string {
 	return path
 }
 
-func TestLoad_YAML_AppliesDefaults(t *testing.T) {
-	path := writeTemp(t, "config.yaml", `
-model: "gpt-4o-mini"
-`)
+func TestLoad_AppliesDefaults(t *testing.T) {
+	path := writeTemp(t, "config.json", `{"model": "gpt-4o-mini"}`)
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
@@ -56,7 +54,7 @@ func TestLoad_JSON(t *testing.T) {
 }
 
 func TestLoad_MissingFile(t *testing.T) {
-	_, err := Load("/nonexistent/path/does-not-exist.yaml")
+	_, err := Load("/nonexistent/path/does-not-exist.json")
 	if err == nil {
 		t.Fatal("expected an error for a missing config file, got nil")
 	}
@@ -64,9 +62,7 @@ func TestLoad_MissingFile(t *testing.T) {
 
 func TestLoad_EnvVarInterpolation(t *testing.T) {
 	t.Setenv("TEST_LITEGENT_API_KEY", "sk-secret-value")
-	path := writeTemp(t, "config.yaml", `
-api_key: "${TEST_LITEGENT_API_KEY}"
-`)
+	path := writeTemp(t, "config.json", `{"api_key": "${TEST_LITEGENT_API_KEY}"}`)
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
@@ -78,9 +74,7 @@ api_key: "${TEST_LITEGENT_API_KEY}"
 
 func TestLoad_EnvVarFallback(t *testing.T) {
 	os.Unsetenv("TEST_LITEGENT_UNSET_VAR")
-	path := writeTemp(t, "config.yaml", `
-model: "${TEST_LITEGENT_UNSET_VAR:-fallback-model}"
-`)
+	path := writeTemp(t, "config.json", `{"model": "${TEST_LITEGENT_UNSET_VAR:-fallback-model}"}`)
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
@@ -91,23 +85,31 @@ model: "${TEST_LITEGENT_UNSET_VAR:-fallback-model}"
 }
 
 func TestLoad_InvalidConfig_NegativeMaxSteps(t *testing.T) {
-	path := writeTemp(t, "config.yaml", `
-max_steps: -1
-`)
+	path := writeTemp(t, "config.json", `{"max_steps": -1}`)
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected validation error for negative max_steps, got nil")
 	}
 }
 
-func TestLoad_InvalidYAML(t *testing.T) {
-	path := writeTemp(t, "config.yaml", "not: valid: yaml: [")
+func TestLoad_InvalidJSON(t *testing.T) {
+	path := writeTemp(t, "config.json", `{"max_steps": `)
 	if _, err := Load(path); err == nil {
-		t.Fatal("expected a parse error for invalid YAML, got nil")
+		t.Fatal("expected a parse error for invalid JSON, got nil")
+	}
+}
+
+// TestLoad_RejectsYAML locks in the JSON-only configuration decision:
+// YAML documents are not valid JSON and must fail rather than being
+// silently accepted.
+func TestLoad_RejectsYAML(t *testing.T) {
+	path := writeTemp(t, "config.yaml", "model: gpt-4o\n")
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected YAML config to be rejected, got nil error")
 	}
 }
 
 func TestLoad_ThinkingDefaults(t *testing.T) {
-	path := writeTemp(t, "config.yaml", `model: "gpt-4o"`)
+	path := writeTemp(t, "config.json", `{"model": "gpt-4o"}`)
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
@@ -124,9 +126,7 @@ func TestLoad_ThinkingDefaults(t *testing.T) {
 }
 
 func TestLoad_ThinkingLevelFreeText(t *testing.T) {
-	path := writeTemp(t, "config.yaml", `
-thinking_level: "High Effort!"
-`)
+	path := writeTemp(t, "config.json", `{"thinking_level": "High Effort!"}`)
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("free-text thinking_level must load without validation, got: %v", err)
@@ -140,10 +140,7 @@ thinking_level: "High Effort!"
 }
 
 func TestLoad_ThinkingExplicitDefaultInactive(t *testing.T) {
-	path := writeTemp(t, "config.yaml", `
-thinking_level: "default"
-thinking_format: "thinking"
-`)
+	path := writeTemp(t, "config.json", `{"thinking_level": "default", "thinking_format": "thinking"}`)
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
@@ -154,30 +151,21 @@ thinking_format: "thinking"
 }
 
 func TestLoad_ThinkingFormatValid(t *testing.T) {
-	path := writeTemp(t, "config.yaml", `
-thinking_level: "high"
-thinking_format: "thinking"
-`)
+	path := writeTemp(t, "config.json", `{"thinking_level": "high", "thinking_format": "thinking"}`)
 	if _, err := Load(path); err != nil {
 		t.Fatalf("thinking format \"thinking\" must validate, got: %v", err)
 	}
 }
 
 func TestLoad_ThinkingFormatInvalid(t *testing.T) {
-	path := writeTemp(t, "config.yaml", `
-thinking_level: "high"
-thinking_format: "bogus"
-`)
+	path := writeTemp(t, "config.json", `{"thinking_level": "high", "thinking_format": "bogus"}`)
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected validation error for unknown thinking_format, got nil")
 	}
 }
 
 func TestLoad_ThinkingFormatNotValidatedWhenInactive(t *testing.T) {
-	path := writeTemp(t, "config.yaml", `
-thinking_level: "default"
-thinking_format: "bogus"
-`)
+	path := writeTemp(t, "config.json", `{"thinking_level": "default", "thinking_format": "bogus"}`)
 	if _, err := Load(path); err != nil {
 		t.Fatalf("thinking_format must be ignored when the level is inactive, got: %v", err)
 	}
@@ -220,22 +208,18 @@ func TestMaskedAPIKey_Short(t *testing.T) {
 	}
 }
 
-// TestLoad_ExampleConfigs guards against the shipped examples/config.yaml
-// and examples/config.json drifting out of sync with the schema.
-func TestLoad_ExampleConfigs(t *testing.T) {
-	for _, path := range []string{"../../examples/config.yaml", "../../examples/config.json"} {
-		t.Run(path, func(t *testing.T) {
-			t.Setenv("OPENAI_API_KEY", "sk-test-value-for-example-config")
-			cfg, err := Load(path)
-			if err != nil {
-				t.Fatalf("Load(%q) returned error: %v", path, err)
-			}
-			if cfg.Model == "" {
-				t.Error("expected a non-empty model in the example config")
-			}
-			if cfg.MaxRepeatedToolCalls != 3 {
-				t.Errorf("MaxRepeatedToolCalls = %d, want 3", cfg.MaxRepeatedToolCalls)
-			}
-		})
+// TestLoad_ExampleConfig guards against the shipped examples/config.json
+// drifting out of sync with the schema.
+func TestLoad_ExampleConfig(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-test-value-for-example-config")
+	cfg, err := Load("../../examples/config.json")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Model == "" {
+		t.Error("expected a non-empty model in the example config")
+	}
+	if cfg.MaxRepeatedToolCalls != 3 {
+		t.Errorf("MaxRepeatedToolCalls = %d, want 3", cfg.MaxRepeatedToolCalls)
 	}
 }

@@ -2,7 +2,7 @@
 
 **Project Name**: Litegent
 **Target Platform**: Linux (Ubuntu 22.04+, Debian 12+, RHEL 9+, Fedora 39+, Arch)
-**Language & Runtime**: Go 1.22+ (standard library `net/http`, `encoding/json`, `context`, `os/exec`, `flag`; `gopkg.in/yaml.v3` for YAML parsing; `github.com/bmatcuk/doublestar/v4` for recursive `**` glob matching). The shipped `go.mod` pins `go 1.26.8` as the toolchain directive (the version `go mod init` stamped), but any Go 1.22+ toolchain builds and passes the full test suite.
+**Language & Runtime**: Go 1.22+ (standard library `net/http`, `encoding/json`, `context`, `os/exec`, `flag`; `github.com/bmatcuk/doublestar/v4` for recursive `**` glob matching). The shipped `go.mod` pins `go 1.26.8` as the toolchain directive (the version `go mod init` stamped), but any Go 1.22+ toolchain builds and passes the full test suite.
 **Document Version**: 2.0.0
 **Status**: Current — reflects the shipped implementation on `main`/`thinner`
 
@@ -34,7 +34,7 @@
 |   +-----------------------+  +-----------------------+  +-------------------+  +----------------+  |
 |   | Config Engine         |  | Skills Engine         |  | Context Manager   |  | Progress       |  |
 |   | (internal/config)     |  | (internal/skills)     |  | (internal/ctxmgr) |  | (internal/     |  |
-|   | - Load JSON/YAML      |  | - Recursive scan *.md |  | - Truncate+Spool  |  |  progress)     |  |
+|   | - Load JSON config    |  | - Recursive scan *.md |  | - Truncate+Spool  |  |  progress)     |  |
 |   | - Env substitution    |  | - Ingest to System    |  | - Sliding Window  |  | - Live stderr  |  |
 |   +-----------------------+  +-----------------------+  | - Summarization   |  |   progress on  |  |
 |                                                          +-------------------+  |   -v, else     |  |
@@ -89,7 +89,7 @@ litegent [-h] [--version] [-s SYSTEM] -i [-c CONFIG] [-k SKILLS] [-v]
 ```
 - `-s, --system PATH`: Path to system prompt text file. (Optional; defaults to `~/.litegent/system.md` when present, otherwise the built-in default system prompt — quoted in `req/user_guide.md` Section 5.1.)
 - `-p, --prompt PATH`: Path to task prompt text file. (Mandatory unless `-i` is set; conflicts with `-i`)
-- `-c, --config PATH`: Path to JSON or YAML config file. (Optional; defaults to `~/.litegent/config.json`)
+- `-c, --config PATH`: Path to JSON config file. (Optional; defaults to `~/.litegent/config.json`)
 - `-k, --skills PATH`: Path to directory of skill Markdown files. (Optional)
 - `-i, --interactive`: Run a persistent, multi-turn session reading task prompts from stdin instead of `-p`. (Optional; see 2.1.1)
 - `-v, --verbose`: Stream live progress to stderr as the loop runs (see 2.1.2). The dual audit log (2.7) is always written regardless of `-v`.
@@ -153,53 +153,53 @@ const (
 ### 2.2 Configuration Module (`internal/config/config.go`)
 
 #### Models & Typing
-Plain Go structs with `yaml`/`json` struct tags. Because valid JSON is also valid YAML, a single `yaml.Unmarshal` call (via `gopkg.in/yaml.v3`, called directly from `Load` — there is no separate wrapper file) transparently parses both configuration formats. Validation is performed with an explicit `(LitegentConfig) Validate() error` method rather than a schema library, keeping the dependency footprint minimal.
+Plain Go structs with `json` struct tags. `Load` parses the file with the standard library `encoding/json` package — JSON is the only supported configuration format — after environment interpolation. Validation is performed with an explicit `(LitegentConfig) Validate() error` method rather than a schema library, keeping the dependency footprint minimal.
 
 ```go
 type ToolBashConfig struct {
-    Enabled        bool    `yaml:"enabled" json:"enabled"`
-    Timeout        float64 `yaml:"timeout" json:"timeout"`
-    DefaultWorkdir string  `yaml:"default_workdir" json:"default_workdir"`
+    Enabled        bool    `json:"enabled"`
+    Timeout        float64 `json:"timeout"`
+    DefaultWorkdir string  `json:"default_workdir"`
 }
 
 type ToolFileOpsConfig struct {
-    Enabled      bool `yaml:"enabled" json:"enabled"`
-    MaxReadLines int  `yaml:"max_read_lines" json:"max_read_lines"`
+    Enabled      bool `json:"enabled"`
+    MaxReadLines int  `json:"max_read_lines"`
 }
 
 type ToolSearchConfig struct {
-    Enabled          bool `yaml:"enabled" json:"enabled"`
-    MaxSearchResults int  `yaml:"max_search_results" json:"max_search_results"`
+    Enabled          bool `json:"enabled"`
+    MaxSearchResults int  `json:"max_search_results"`
 }
 
 type ToolsConfig struct {
-    Bash    ToolBashConfig    `yaml:"bash" json:"bash"`
-    FileOps ToolFileOpsConfig `yaml:"file_ops" json:"file_ops"`
-    Search  ToolSearchConfig  `yaml:"search" json:"search"`
+    Bash    ToolBashConfig    `json:"bash"`
+    FileOps ToolFileOpsConfig `json:"file_ops"`
+    Search  ToolSearchConfig  `json:"search"`
 }
 
 type ContextConfig struct {
-    MaxContextTokens   int    `yaml:"max_context_tokens" json:"max_context_tokens"`
-    MaxToolOutputChars int    `yaml:"max_tool_output_chars" json:"max_tool_output_chars"`
-    WindowSize         int    `yaml:"window_size" json:"window_size"`
-    SpoolDir           string `yaml:"spool_dir" json:"spool_dir"`
+    MaxContextTokens   int    `json:"max_context_tokens"`
+    MaxToolOutputChars int    `json:"max_tool_output_chars"`
+    WindowSize         int    `json:"window_size"`
+    SpoolDir           string `json:"spool_dir"`
 }
 
 type LitegentConfig struct {
-    BaseURL              string        `yaml:"base_url" json:"base_url"`
-    APIKey               string        `yaml:"api_key" json:"api_key"`
-    Model                string        `yaml:"model" json:"model"`
-    Temperature          float64       `yaml:"temperature" json:"temperature"`
-    MaxTokens            int           `yaml:"max_tokens" json:"max_tokens"`
-    ThinkingLevel        string        `yaml:"thinking_level" json:"thinking_level"`
-    ThinkingFormat       string        `yaml:"thinking_format" json:"thinking_format"`
-    Timeout              float64       `yaml:"timeout" json:"timeout"`
-    MaxSteps             int           `yaml:"max_steps" json:"max_steps"`
-    MaxRepeatedToolCalls int           `yaml:"max_repeated_tool_calls" json:"max_repeated_tool_calls"`
-    ManageContext        bool          `yaml:"manage_context" json:"manage_context"`
-    ContextConfig        ContextConfig `yaml:"context_config" json:"context_config"`
-    LogDir               string        `yaml:"log_dir" json:"log_dir"`
-    Tools                ToolsConfig   `yaml:"tools" json:"tools"`
+    BaseURL              string        `json:"base_url"`
+    APIKey               string        `json:"api_key"`
+    Model                string        `json:"model"`
+    Temperature          float64       `json:"temperature"`
+    MaxTokens            int           `json:"max_tokens"`
+    ThinkingLevel        string        `json:"thinking_level"`
+    ThinkingFormat       string        `json:"thinking_format"`
+    Timeout              float64       `json:"timeout"`
+    MaxSteps             int           `json:"max_steps"`
+    MaxRepeatedToolCalls int           `json:"max_repeated_tool_calls"`
+    ManageContext        bool          `json:"manage_context"`
+    ContextConfig        ContextConfig `json:"context_config"`
+    LogDir               string        `json:"log_dir"`
+    Tools                ToolsConfig   `json:"tools"`
 }
 
 // Default returns the documented default configuration. Load starts from
@@ -571,7 +571,9 @@ When a summarization call is made, it covers the newly evicted messages plus any
 - Returns an error if `skillsDir` doesn't exist or isn't a directory.
 - `filepath.WalkDir(skillsDir, ...)`, matching files whose lowercased name ends in `.md`.
 - Extracts the title from the first line matching `# <Title>` (via a line-by-line scan with `bufio.Scanner`); falls back to the filename if no such heading exists.
-- Assembles `<available_skills>\n  <skill name=%q file=%q>\n<full file content>\n  </skill>\n...\n</available_skills>` — one `<skill>` block per discovered file, in filesystem walk order.
+- Validates each file before embedding it: content containing the catalog's own wrapper tags (`<skill>`, `</skill>`, `<available_skills>`, `</available_skills>`, case-insensitive, whitespace-tolerant) is rejected with a descriptive error, so a misplaced XML fragment cannot close or reopen the catalog and corrupt subsequent skills. Ordinary angle-bracket placeholder text such as `<dir>` is allowed.
+- Escapes skill titles and paths for XML attributes, so quotes or ampersands in a filename cannot terminate an attribute early.
+- Assembles `<available_skills>\n  <skill name="..." file="...">\n<full file content>\n  </skill>\n...\n</available_skills>` — one `<skill>` block per discovered file, in filesystem walk order.
 - Returns `("", nil)` (empty string, no error) if zero `.md` files were found, so callers can skip injection entirely.
 
 `internal/cliapp.Run` appends the result (if non-empty) to the system prompt text with a `"\n\n"` separator before passing it to the agent.
