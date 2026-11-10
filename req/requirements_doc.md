@@ -52,7 +52,7 @@ Modern AI coding and operations agents often suffer from:
   
 - **FR-1.2: System Prompt File (`-s, --system`)**  
   - Shall accept an optional path pointing to a readable file containing the system prompt.
-  - When the flag is omitted, Litegent must use a built-in default system prompt (`You are a helpful agent.`).
+  - When the flag is omitted, Litegent must use the built-in default system prompt (see `req/user_guide.md`).
   - If the flag is provided but the file does not exist or is not readable, Litegent must exit immediately with an error message and exit code `1`.
 
 - **FR-1.3: User Prompt File (`-p, --prompt`)**  

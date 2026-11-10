@@ -9,7 +9,7 @@
 ## What Litegent Does (In Brief)
 
 Litegent takes a system prompt and a configuration file, plus either a one-shot task prompt or an interactive session flag, and an optional skills directory:
-1. **`-s <file>`** *(optional)*: System prompt defining the agent's role, behavioral principles, and operating constraints. When omitted, a minimal built-in prompt (`You are a helpful agent.`) is used.
+1. **`-s <file>`** *(optional)*: System prompt defining the agent's role, behavioral principles, and operating constraints. When omitted, the built-in default system prompt is used (quoted in `req/user_guide.md`).
 2. **`-p <file>`**: Task prompt for a single, non-interactive run. Required unless `-i` is set.
 3. **`-c <file>`**: Configuration file (JSON or YAML) defining model parameters, timeouts, logging settings, and context controls. (Always required.)
 4. **`-i`** *(optional)*: Run a persistent, multi-turn interactive session instead — task prompts are read one line at a time from stdin until `/exit`, `/quit`, or EOF. Conflicts with `-p`.

@@ -45,10 +45,14 @@ const (
 // transcript. It is presentation only — never added to history.
 const turnSeparator = "----====----"
 
-// defaultSystemPrompt is used when no -s/--system file is supplied. The
-// prompt is deliberately minimal: callers that care about a specific role
-// or behavioral boundary should provide their own system prompt file.
-const defaultSystemPrompt = "You are a helpful agent."
+// defaultSystemPrompt is used when no -s/--system file is supplied. It
+// sets baseline expectations for confirmation, backups, clarifying
+// questions, scope discipline, and follow-up recommendations; callers
+// that need a specific role should provide their own prompt file.
+const defaultSystemPrompt = "you are a helpful, considerate, highly experienced technical assistant. " +
+	"Always confirm, make backups before making changes, remove ambiguity by asking questions, " +
+	"never go beyond the request - stay focused. But when issues and opportunities are discovered, " +
+	"recommend followup actions; when possible consult docs"
 
 const usage = `litegent - an autonomous, unconfined CLI AI agent for Linux
 

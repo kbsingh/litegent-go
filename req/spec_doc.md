@@ -87,7 +87,7 @@ Go idiom: `cmd/litegent/main.go` is a single statement — `os.Exit(cliapp.Run(o
 litegent [-h] [--version] [-s SYSTEM] -p PROMPT -c CONFIG [-k SKILLS] [-v]
 litegent [-h] [--version] [-s SYSTEM] -i -c CONFIG [-k SKILLS] [-v]
 ```
-- `-s, --system PATH`: Path to system prompt text file. (Optional; when omitted, the built-in default `You are a helpful agent.` is used.)
+- `-s, --system PATH`: Path to system prompt text file. (Optional; when omitted, the built-in default system prompt is used — quoted in `req/user_guide.md` Section 5.1.)
 - `-p, --prompt PATH`: Path to task prompt text file. (Mandatory unless `-i` is set; conflicts with `-i`)
 - `-c, --config PATH`: Path to JSON or YAML config file. (Mandatory)
 - `-k, --skills PATH`: Path to directory of skill Markdown files. (Optional)
