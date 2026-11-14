@@ -338,10 +338,17 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	defer logger.Close()
 
+	store := &session.Store{Info: sess}
+	if err := store.SaveContext([]llm.Message{{Role: llm.RoleSystem, Content: systemPrompt}}); err != nil {
+		fmt.Fprintf(stderr, "litegent: initializing context: %v\n", err)
+		return ExitConfigOrCLIError
+	}
+
 	registry := buildRegistry(cfg)
 	llmClient := llm.NewClient(cfg)
 	ctxManager := ctxmgr.NewManager(cfg.ContextConfig, llmClient)
 	ag := agent.New(cfg, llmClient, registry, ctxManager, logger)
+	ag.Store = store
 	prog := progress.New(args.verbose, stderr, cfg.APIKey)
 	prog.ShowToolCalls = args.interactive
 	ag.Progress = prog
@@ -376,6 +383,9 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case agent.OutcomeInterrupted:
 		fmt.Fprintln(stderr, "litegent: interrupted")
 		exitCode = ExitInterrupted
+	case agent.OutcomeStorageError:
+		fmt.Fprintf(stderr, "litegent: storage error: %v\n", result.Err)
+		exitCode = ExitConfigOrCLIError
 	default: // agent.OutcomeLLMError and any unforeseen outcome
 		fmt.Fprintf(stderr, "litegent: fatal LLM error: %v\n", result.Err)
 		exitCode = ExitLLMAPIError
@@ -439,6 +449,9 @@ func runInteractive(ctx context.Context, ag *agent.Agent, systemPrompt string, c
 		case agent.OutcomeInterrupted:
 			fmt.Fprintln(stderr, "litegent: interrupted")
 			return false
+		case agent.OutcomeStorageError:
+			fmt.Fprintf(stderr, "litegent: turn %d: storage error: %v\n", turn, result.Err)
+			return false
 		default: // agent.OutcomeLLMError and any unforeseen outcome
 			fmt.Fprintf(stderr, "litegent: turn %d: fatal LLM error: %v\n", turn, result.Err)
 			return false // a fatal LLM error isn't recoverable mid-session
@@ -454,6 +467,8 @@ func runInteractive(ctx context.Context, ag *agent.Agent, systemPrompt string, c
 		exitCode = ExitInterrupted
 	case agent.OutcomeLLMError:
 		exitCode = ExitLLMAPIError
+	case agent.OutcomeStorageError:
+		exitCode = ExitConfigOrCLIError
 	default: // a session that ends via EOF/"/exit" or after a recoverable max_steps turn is a clean exit
 		exitCode = ExitSuccess
 	}

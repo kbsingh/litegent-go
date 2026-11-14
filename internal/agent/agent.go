@@ -33,6 +33,8 @@ const (
 	OutcomeLLMError
 	// OutcomeInterrupted means the context was canceled (SIGINT/SIGTERM).
 	OutcomeInterrupted
+	// OutcomeStorageError means the durable context could not be saved.
+	OutcomeStorageError
 )
 
 // String renders the outcome as a short label, used in progress/log
@@ -47,6 +49,8 @@ func (o Outcome) String() string {
 		return "llm_error"
 	case OutcomeInterrupted:
 		return "interrupted"
+	case OutcomeStorageError:
+		return "storage_error"
 	default:
 		return "unknown"
 	}
@@ -61,6 +65,13 @@ type Result struct {
 	Err          error
 }
 
+// ContextStore persists the effective conversation context at safe
+// boundaries. A nil store means persistence is disabled (used by tests
+// and by callers that do not need resume support).
+type ContextStore interface {
+	SaveContext(messages []llm.Message) error
+}
+
 // Agent orchestrates the agentic loop by wiring together the LLM client,
 // tool registry, context manager, and dual logger.
 type Agent struct {
@@ -69,6 +80,7 @@ type Agent struct {
 	Tools   *tools.Registry
 	Context *ctxmgr.Manager
 	Logger  *logging.Logger
+	Store   ContextStore
 
 	// Progress optionally streams live, human-facing progress lines
 	// (typically to stderr) as the loop runs. A nil Progress is safe —
@@ -100,12 +112,25 @@ type callSignature struct {
 // error occurs, or ctx is canceled. For a persistent multi-turn session,
 // see RunInteractive.
 func (a *Agent) Run(ctx context.Context, systemPrompt, userPrompt string) Result {
-	messages := []llm.Message{
-		{Role: llm.RoleSystem, Content: systemPrompt},
-		{Role: llm.RoleUser, Content: userPrompt},
+	return a.RunWithHistory(ctx, []llm.Message{{Role: llm.RoleSystem, Content: systemPrompt}}, userPrompt, 1)
+}
+
+// RunWithHistory executes a single-shot turn against an existing message
+// history. The caller is responsible for having loaded/validated history;
+// the new user prompt is appended, logged, and persisted before the first
+// LLM request.
+func (a *Agent) RunWithHistory(ctx context.Context, history []llm.Message, userPrompt string, turn int) Result {
+	if turn <= 0 {
+		turn = 1
 	}
-	_ = a.Logger.LogUserPrompt(1, userPrompt)
-	_, result := a.runTurn(ctx, messages, 1)
+	messages := append([]llm.Message(nil), history...)
+	messages = append(messages, llm.Message{Role: llm.RoleUser, Content: userPrompt})
+	_ = a.Logger.LogUserPrompt(turn, userPrompt)
+	if err := a.saveContext(turn, 0, messages); err != nil {
+		_ = a.Logger.LogTurnEnd(turn, OutcomeStorageError.String(), 0, 0)
+		return Result{Outcome: OutcomeStorageError, Steps: 0, Err: err}
+	}
+	_, result := a.runTurn(ctx, messages, turn)
 	return result
 }
 
@@ -126,9 +151,28 @@ func (a *Agent) RunInteractive(
 	readPrompt func() (prompt string, ok bool),
 	onTurnResult func(turn int, result Result) (cont bool),
 ) Result {
-	messages := []llm.Message{{Role: llm.RoleSystem, Content: systemPrompt}}
+	return a.RunInteractiveWithHistory(
+		ctx,
+		[]llm.Message{{Role: llm.RoleSystem, Content: systemPrompt}},
+		0,
+		readPrompt,
+		onTurnResult,
+	)
+}
 
-	turn := 0
+// RunInteractiveWithHistory is RunInteractive with an existing history
+// and a starting turn number. New prompts are appended, logged, and
+// persisted before each turn.
+func (a *Agent) RunInteractiveWithHistory(
+	ctx context.Context,
+	history []llm.Message,
+	startTurn int,
+	readPrompt func() (prompt string, ok bool),
+	onTurnResult func(turn int, result Result) (cont bool),
+) Result {
+	messages := append([]llm.Message(nil), history...)
+
+	turn := startTurn
 	totalSteps := 0
 	totalTokens := 0
 	for {
@@ -144,6 +188,10 @@ func (a *Agent) RunInteractive(
 		_ = a.Logger.LogUserPrompt(turn, prompt)
 
 		messages = append(messages, llm.Message{Role: llm.RoleUser, Content: prompt})
+		if err := a.saveContext(turn, 0, messages); err != nil {
+			_ = a.Logger.LogTurnEnd(turn, OutcomeStorageError.String(), 0, 0)
+			return Result{Outcome: OutcomeStorageError, Steps: totalSteps, TotalTokens: totalTokens, Err: err}
+		}
 
 		var result Result
 		messages, result = a.runTurn(ctx, messages, turn)
@@ -156,6 +204,20 @@ func (a *Agent) RunInteractive(
 			return result
 		}
 	}
+}
+
+// saveContext persists the current message list when a store is
+// configured. Persistence failures are logged here and returned to the
+// caller, which aborts with OutcomeStorageError.
+func (a *Agent) saveContext(turn, step int, messages []llm.Message) error {
+	if a.Store == nil {
+		return nil
+	}
+	if err := a.Store.SaveContext(messages); err != nil {
+		_ = a.Logger.LogSessionError(turn, step, "saving context: "+err.Error())
+		return err
+	}
+	return nil
 }
 
 // runTurn executes the agentic loop for a single turn against the given
@@ -196,9 +258,16 @@ func (a *Agent) runTurn(ctx context.Context, messages []llm.Message, turn int) (
 				_ = a.Logger.LogContextSummary(turn, step, prepared.Summary)
 			}
 			a.Progress.ContextPruned(step, before, len(messages))
+			if prepared.Evicted > 0 || prepared.Summarized {
+				if err := a.saveContext(turn, step, messages); err != nil {
+					_ = a.Logger.LogTurnEnd(turn, OutcomeStorageError.String(), step, totalTokens)
+					return messages, Result{Outcome: OutcomeStorageError, Steps: step, TotalTokens: totalTokens, Err: err}
+				}
+			}
 		}
 
-		_ = a.Logger.LogLLMRequest(turn, step, len(messages), ctxmgr.EstimateTokens(messages), "")
+		contextSHA, _ := llm.HashMessages(messages)
+		_ = a.Logger.LogLLMRequest(turn, step, len(messages), ctxmgr.EstimateTokens(messages), contextSHA)
 		reqStarted := a.Progress.Request(step, len(messages), len(a.Tools.Schemas()))
 		resp, err := a.LLM.ChatCompletion(ctx, messages, a.Tools.Schemas())
 		if err != nil {
@@ -221,6 +290,10 @@ func (a *Agent) runTurn(ctx context.Context, messages []llm.Message, turn int) (
 			// Preserve the assistant's final answer in history: in a
 			// multi-turn session the next turn must still see it.
 			messages = append(messages, choice.Message)
+			if err := a.saveContext(turn, step, messages); err != nil {
+				_ = a.Logger.LogTurnEnd(turn, OutcomeStorageError.String(), step+1, totalTokens)
+				return messages, Result{Outcome: OutcomeStorageError, Steps: step + 1, TotalTokens: totalTokens, Err: err}
+			}
 			_ = a.Logger.LogFinish(turn, step, choice.Message.Content, step+1, totalTokens)
 			_ = a.Logger.LogTurnEnd(turn, OutcomeSuccess.String(), step+1, totalTokens)
 			a.Progress.TurnEnd(turn, OutcomeSuccess.String(), step+1)
@@ -233,8 +306,16 @@ func (a *Agent) runTurn(ctx context.Context, messages []llm.Message, turn int) (
 			toolMsg := a.dispatchToolCall(ctx, turn, step, call)
 			messages = append(messages, toolMsg)
 		}
+		if err := a.saveContext(turn, step, messages); err != nil {
+			_ = a.Logger.LogTurnEnd(turn, OutcomeStorageError.String(), step+1, totalTokens)
+			return messages, Result{Outcome: OutcomeStorageError, Steps: step + 1, TotalTokens: totalTokens, Err: err}
+		}
 	}
 
+	if err := a.saveContext(turn, step, messages); err != nil {
+		_ = a.Logger.LogTurnEnd(turn, OutcomeStorageError.String(), step, totalTokens)
+		return messages, Result{Outcome: OutcomeStorageError, Steps: step, TotalTokens: totalTokens, Err: err}
+	}
 	_ = a.Logger.LogSessionError(turn, step, fmt.Sprintf("max_steps (%d) exceeded without a final response", a.Config.MaxSteps))
 	_ = a.Logger.LogTurnEnd(turn, OutcomeMaxStepsExceeded.String(), step, totalTokens)
 	a.Progress.TurnEnd(turn, OutcomeMaxStepsExceeded.String(), step)

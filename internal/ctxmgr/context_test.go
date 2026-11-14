@@ -10,6 +10,7 @@ import (
 
 	"litegent/internal/config"
 	"litegent/internal/llm"
+	"litegent/internal/session"
 )
 
 func TestTruncateToolOutput_UnderLimit(t *testing.T) {
@@ -200,5 +201,62 @@ func TestEstimateTokens(t *testing.T) {
 	got := EstimateTokens(messages)
 	if got != 100 {
 		t.Errorf("EstimateTokens() = %d, want 100 (400 chars / 4)", got)
+	}
+}
+
+func TestPrepare_DoesNotSplitToolCallPairs(t *testing.T) {
+	m := NewManager(config.ContextConfig{WindowSize: 3}, nil)
+	messages := []llm.Message{
+		{Role: llm.RoleSystem, Content: "sys"},
+		{Role: llm.RoleUser, Content: "task"},
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{
+			ID:       "call_1",
+			Type:     "function",
+			Function: llm.FunctionCall{Name: "bash", Arguments: `{}`},
+		}}},
+		{Role: llm.RoleTool, ToolCallID: "call_1", Content: "result"},
+		{Role: llm.RoleAssistant, Content: "first answer"},
+		{Role: llm.RoleUser, Content: "second task"},
+		{Role: llm.RoleAssistant, Content: "second answer"},
+	}
+
+	res, err := m.Prepare(context.Background(), messages)
+	if err != nil {
+		t.Fatalf("Prepare returned error: %v", err)
+	}
+	if res.Evicted == 0 {
+		t.Fatal("expected pruning to occur")
+	}
+	if err := session.ValidateMessages(res.Messages); err != nil {
+		t.Fatalf("prepared context is structurally invalid: %v", err)
+	}
+	if res.Messages[2].Role == llm.RoleTool {
+		t.Errorf("prepared context starts with an orphaned tool message: %+v", res.Messages)
+	}
+}
+
+func TestPrepare_KeepsLastUnitWhenItExceedsWindow(t *testing.T) {
+	m := NewManager(config.ContextConfig{WindowSize: 1}, nil)
+	messages := []llm.Message{
+		{Role: llm.RoleSystem, Content: "sys"},
+		{Role: llm.RoleUser, Content: "task"},
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{
+			ID:       "call_1",
+			Type:     "function",
+			Function: llm.FunctionCall{Name: "bash", Arguments: `{}`},
+		}}},
+		{Role: llm.RoleTool, ToolCallID: "call_1", Content: "result"},
+		{Role: llm.RoleAssistant, Content: "final"},
+	}
+
+	res, err := m.Prepare(context.Background(), messages)
+	if err != nil {
+		t.Fatalf("Prepare returned error: %v", err)
+	}
+	if err := session.ValidateMessages(res.Messages); err != nil {
+		t.Fatalf("prepared context is structurally invalid: %v", err)
+	}
+	if last := res.Messages[len(res.Messages)-1]; last.Role != llm.RoleAssistant || last.Content != "final" {
+		t.Errorf("expected the final assistant message to be retained, got: %+v", res.Messages)
 	}
 }

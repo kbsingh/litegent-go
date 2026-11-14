@@ -129,8 +129,8 @@ func (m *Manager) Prepare(ctx context.Context, messages []llm.Message) (PrepareR
 	summarized := false
 	summaryText := ""
 
-	if m.cfg.WindowSize > 0 && len(active) > m.cfg.WindowSize {
-		evictedCount := len(active) - m.cfg.WindowSize
+	evictedCount := evictionCount(active, m.cfg.WindowSize)
+	if evictedCount > 0 {
 		evictedTotal = evictedCount
 		evicted := active[:evictedCount]
 		kept := active[evictedCount:]
@@ -172,6 +172,43 @@ func (m *Manager) Prepare(ctx context.Context, messages []llm.Message) (PrepareR
 		Summarized: summarized,
 		Summary:    summaryText,
 	}, nil
+}
+
+// evictionCount returns how many leading messages can be evicted without
+// splitting an assistant tool-call message from its tool results. At least
+// one unit is always retained, even when that unit alone exceeds the
+// configured window, so the currently active exchange is never lost.
+func evictionCount(active []llm.Message, window int) int {
+	if window <= 0 || len(active) <= window {
+		return 0
+	}
+	units := splitUnits(active)
+	remaining := len(active)
+	evicted := 0
+	for len(units) > 1 && remaining > window {
+		remaining -= len(units[0])
+		evicted += len(units[0])
+		units = units[1:]
+	}
+	return evicted
+}
+
+// splitUnits groups an assistant message carrying tool calls together with
+// the tool results that immediately follow it. Every other message is its
+// own unit.
+func splitUnits(messages []llm.Message) [][]llm.Message {
+	var units [][]llm.Message
+	for i := 0; i < len(messages); {
+		j := i + 1
+		if messages[i].Role == llm.RoleAssistant && len(messages[i].ToolCalls) > 0 {
+			for j < len(messages) && messages[j].Role == llm.RoleTool {
+				j++
+			}
+		}
+		units = append(units, messages[i:j])
+		i = j
+	}
+	return units
 }
 
 // EstimateTokens is a lightweight, dependency-free token estimate (~4

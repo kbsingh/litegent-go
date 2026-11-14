@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"litegent/internal/llm"
+	"litegent/internal/session"
 )
 
 func writeFile(t *testing.T, dir, name, content string) string {
@@ -725,11 +726,27 @@ func TestRun_CreatesSessionLayout(t *testing.T) {
 	}
 	for _, path := range []string{
 		filepath.Join(sessionDir, "session.json"),
+		filepath.Join(sessionDir, "context.json"),
 		filepath.Join(sessionDir, "logs"),
 		filepath.Join(sessionDir, "spool"),
 	} {
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("expected %s: %v", path, err)
 		}
+	}
+	info := &session.Info{
+		ID:          filepath.Base(sessionDir),
+		ContextPath: filepath.Join(sessionDir, "context.json"),
+	}
+	msgs, err := session.LoadContext(info)
+	if err != nil {
+		t.Fatalf("LoadContext returned error: %v", err)
+	}
+	if len(msgs) == 0 || msgs[0].Role != llm.RoleSystem {
+		t.Fatalf("context does not start with a system message: %+v", msgs)
+	}
+	last := msgs[len(msgs)-1]
+	if last.Role != llm.RoleAssistant || last.Content != "done" {
+		t.Errorf("context does not end with the final assistant answer: %+v", last)
 	}
 }

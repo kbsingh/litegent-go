@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -521,5 +522,103 @@ func TestAgent_TruncationCanBeDisabled(t *testing.T) {
 		if m.Role == llm.RoleTool && strings.Contains(m.Content, "TRUNCATED") {
 			t.Error("truncation must be disabled, but tool output carried a TRUNCATED notice")
 		}
+	}
+}
+
+type fakeContextStore struct {
+	saves  [][]llm.Message
+	calls  int
+	failAt int
+}
+
+func (f *fakeContextStore) SaveContext(messages []llm.Message) error {
+	f.calls++
+	if f.failAt > 0 && f.calls == f.failAt {
+		return errors.New("injected storage failure")
+	}
+	cp := append([]llm.Message(nil), messages...)
+	f.saves = append(f.saves, cp)
+	return nil
+}
+
+func TestAgent_PersistsContextAtBoundaries(t *testing.T) {
+	server := newScriptedServer(
+		toolCallResponse("call_1", "echo_tool", `{}`),
+		finalResponse("done"),
+	)
+	registry := tools.NewRegistry()
+	registry.Register(&fakeTool{name: "echo_tool", fn: func(n int, args map[string]any) *tools.ToolResult {
+		return &tools.ToolResult{Success: true, Output: "ok"}
+	}})
+
+	a := newTestAgent(t, server, registry, nil)
+	store := &fakeContextStore{}
+	a.Store = store
+
+	result := a.Run(context.Background(), "system", "task")
+	if result.Outcome != OutcomeSuccess {
+		t.Fatalf("Outcome = %v, err=%v", result.Outcome, result.Err)
+	}
+	if len(store.saves) < 3 {
+		t.Fatalf("expected at least 3 context saves (user, tool step, final), got %d", len(store.saves))
+	}
+	sawTool := false
+	for _, save := range store.saves {
+		for _, msg := range save {
+			if msg.Role == llm.RoleTool && msg.ToolCallID == "call_1" {
+				sawTool = true
+			}
+		}
+	}
+	if !sawTool {
+		t.Error("no saved context included the tool result")
+	}
+	last := store.saves[len(store.saves)-1]
+	if last[len(last)-1].Role != llm.RoleAssistant || last[len(last)-1].Content != "done" {
+		t.Errorf("last saved context does not end with the final assistant answer: %+v", last)
+	}
+}
+
+func TestAgent_StorageFailureAbortsBeforeLLM(t *testing.T) {
+	server := newScriptedServer(finalResponse("should not happen"))
+	a := newTestAgent(t, server, tools.NewRegistry(), nil)
+	a.Store = &fakeContextStore{failAt: 1}
+
+	result := a.Run(context.Background(), "system", "task")
+	if result.Outcome != OutcomeStorageError {
+		t.Fatalf("Outcome = %v, want OutcomeStorageError", result.Outcome)
+	}
+	if n := len(server.requests); n != 0 {
+		t.Errorf("LLM was called %d times after a storage failure, want 0", n)
+	}
+}
+
+func TestAgent_RunWithHistoryUsesProvidedMessages(t *testing.T) {
+	server := newScriptedServer(finalResponse("new answer"))
+	a := newTestAgent(t, server, tools.NewRegistry(), nil)
+
+	history := []llm.Message{
+		{Role: llm.RoleSystem, Content: "system"},
+		{Role: llm.RoleUser, Content: "prior question"},
+		{Role: llm.RoleAssistant, Content: "prior answer"},
+	}
+	result := a.RunWithHistory(context.Background(), history, "new question", 2)
+	if result.Outcome != OutcomeSuccess {
+		t.Fatalf("Outcome = %v, err=%v", result.Outcome, result.Err)
+	}
+	req := server.lastRequest()
+	foundPriorUser, foundPriorAssistant, foundNewUser := false, false, false
+	for _, msg := range req.Messages {
+		switch {
+		case msg.Role == llm.RoleUser && msg.Content == "prior question":
+			foundPriorUser = true
+		case msg.Role == llm.RoleAssistant && msg.Content == "prior answer":
+			foundPriorAssistant = true
+		case msg.Role == llm.RoleUser && msg.Content == "new question":
+			foundNewUser = true
+		}
+	}
+	if !foundPriorUser || !foundPriorAssistant || !foundNewUser {
+		t.Errorf("request missing history or new prompt: %+v", req.Messages)
 	}
 }
