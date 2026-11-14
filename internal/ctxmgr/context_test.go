@@ -53,6 +53,13 @@ func TestTruncateToolOutput_OverLimit_Spools(t *testing.T) {
 	if string(spooled) != raw {
 		t.Errorf("spooled content does not match raw output")
 	}
+	fi, err := os.Stat(spoolFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Errorf("spool file mode = %o, want 600", got)
+	}
 }
 
 func TestPrepare_NoOpBelowWindowSize(t *testing.T) {

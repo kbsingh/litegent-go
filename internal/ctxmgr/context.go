@@ -62,11 +62,11 @@ func (m *Manager) TruncateToolOutput(callID, rawOutput string) (string, *Truncat
 	if spoolDir == "" {
 		spoolDir = ".tmp/tool_outputs"
 	}
-	if err := os.MkdirAll(spoolDir, 0o755); err != nil {
+	if err := os.MkdirAll(spoolDir, 0o700); err != nil {
 		return "", nil, fmt.Errorf("creating spool dir: %w", err)
 	}
 	spoolFile := filepath.Join(spoolDir, fmt.Sprintf("output_%s.txt", callID))
-	if err := os.WriteFile(spoolFile, []byte(rawOutput), 0o644); err != nil {
+	if err := os.WriteFile(spoolFile, []byte(rawOutput), 0o600); err != nil {
 		return "", nil, fmt.Errorf("spooling output: %w", err)
 	}
 
