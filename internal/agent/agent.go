@@ -185,6 +185,11 @@ func (a *Agent) RunInteractiveWithHistory(
 
 		prompt, ok := readPrompt()
 		if !ok {
+			// A prompt read that ends because the context was canceled is
+			// an interruption, not a clean EOF/exit.
+			if err := ctx.Err(); err != nil {
+				return Result{Outcome: OutcomeInterrupted, Steps: totalSteps, TotalTokens: totalTokens, Err: err}
+			}
 			return Result{Outcome: OutcomeSuccess, Steps: totalSteps, TotalTokens: totalTokens}
 		}
 		turn++

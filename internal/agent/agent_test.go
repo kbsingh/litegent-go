@@ -622,3 +622,20 @@ func TestAgent_RunWithHistoryUsesProvidedMessages(t *testing.T) {
 		t.Errorf("request missing history or new prompt: %+v", req.Messages)
 	}
 }
+
+func TestAgent_InteractiveCancelDuringPromptIsInterrupted(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	a := newTestAgent(t, newScriptedServer(finalResponse("unused")), tools.NewRegistry(), nil)
+	readPrompt := func() (string, bool) {
+		cancel()
+		return "", false
+	}
+	result := a.RunInteractive(ctx, "system", readPrompt, func(turn int, result Result) bool {
+		return true
+	})
+	if result.Outcome != OutcomeInterrupted {
+		t.Fatalf("Outcome = %v, want OutcomeInterrupted", result.Outcome)
+	}
+}

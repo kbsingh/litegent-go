@@ -1150,3 +1150,84 @@ func TestRun_ResumeWarnsOnIncompletePreviousRun(t *testing.T) {
 		t.Errorf("expected incomplete-run warning, got: %q", stderr.String())
 	}
 }
+
+func TestRun_TruncatedToolOutputUsesSessionSpool(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req llm.ChatRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		hasTool := false
+		for _, m := range req.Messages {
+			if m.Role == llm.RoleTool {
+				hasTool = true
+			}
+		}
+		if !hasTool {
+			json.NewEncoder(w).Encode(llm.ChatResponse{
+				Choices: []llm.Choice{{
+					Message: llm.Message{
+						Role: llm.RoleAssistant,
+						ToolCalls: []llm.ToolCall{{
+							ID: "call_1", Type: "function",
+							Function: llm.FunctionCall{Name: "bash", Arguments: `{"command":"head -c 5000 /dev/zero | tr '\\0' x"}`},
+						}},
+					},
+					FinishReason: "tool_calls",
+				}},
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(llm.ChatResponse{
+			Choices: []llm.Choice{{Message: llm.Message{Role: llm.RoleAssistant, Content: "done"}, FinishReason: "stop"}},
+		})
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	cfgPath := writeFile(t, dir, "config.json", `{
+  "base_url": "`+server.URL+`",
+  "model": "test-model",
+  "context_config": {"max_tool_output_chars": 100, "spool_dir": "spool"}
+}`)
+	promptPath := writeFile(t, dir, "prompt.txt", "task")
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"-p", promptPath, "-c", cfgPath}, strings.NewReader(""), &stdout, &stderr)
+	if code != ExitSuccess {
+		t.Fatalf("run failed: code=%d stderr=%s", code, stderr.String())
+	}
+	sessions := findSessionDirs(t, dir)
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	spoolPath := filepath.Join(sessions[0], "spool", "output_call_1.txt")
+	if _, err := os.Stat(spoolPath); err != nil {
+		t.Errorf("expected session spool file: %v", err)
+	}
+	info := &session.Info{ID: filepath.Base(sessions[0]), ContextPath: filepath.Join(sessions[0], "context.json")}
+	msgs, err := session.LoadContext(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundTruncated := false
+	for _, m := range msgs {
+		if m.Role == llm.RoleTool && strings.Contains(m.Content, "TRUNCATED") {
+			foundTruncated = true
+		}
+	}
+	if !foundTruncated {
+		t.Error("expected truncated tool message in context")
+	}
+	logs, err := filepath.Glob(filepath.Join(sessions[0], "logs", "session_*.log"))
+	if err != nil || len(logs) != 1 {
+		t.Fatalf("expected one session log, got %v err=%v", logs, err)
+	}
+	data, err := os.ReadFile(logs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"TRUNCATION", "MODEL INPUT", "OUTPUT"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("session log missing %q", want)
+		}
+	}
+}
