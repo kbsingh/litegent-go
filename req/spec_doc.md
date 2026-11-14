@@ -570,7 +570,7 @@ type TruncationInfo struct {
     OmittedChars int
 }
 ```
-This stage only runs when `manage_context && truncate_tool_outputs`. If `m.cfg.MaxToolOutputChars <= 0` or `len(rawOutput)` is already within it, it returns `(rawOutput, nil, nil)` unchanged — a `nil` `*TruncationInfo` means "no truncation happened," which `internal/agent` uses to decide whether to log a `context_truncation` trace event. Otherwise it writes the full `rawOutput` to `<session-spool-dir>/output_<callID>.txt` (default `spool/` inside the session), then splices a 60% head + truncation notice + 30% tail.
+This stage only runs when `manage_context && truncate_tool_outputs`. If `m.cfg.MaxToolOutputChars <= 0` or `len(rawOutput)` is already within it, it returns `(rawOutput, nil, nil)` unchanged — a `nil` `*TruncationInfo` means "no truncation happened," which `internal/agent` uses to decide whether to log a `context_truncation` trace event. Otherwise it writes the full model-facing payload to `<session-spool-dir>/output_<callID>.txt` (default `spool/` inside the session), then splices a 60% head + truncation notice + 30% tail. The human log separately records the raw tool output as well as this exact model-visible content.
 
 #### Stage 2 & 3 — `(m *Manager) Prepare(ctx context.Context, messages []llm.Message) (PrepareResult, error)`
 ```go

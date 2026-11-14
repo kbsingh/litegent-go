@@ -301,7 +301,7 @@ When `manage_context: true` is configured, Litegent actively protects your model
 
 1. **Tool Output Truncation**:
    - Controlled independently by `truncate_tool_outputs` (default `true`). When enabled, outputs exceeding `max_tool_output_chars` are truncated; when disabled, full output is passed through.
-   - The full output is written to `<session-dir>/<spool_dir>/output_<call_id>.txt` (default `spool/output_<call_id>.txt` inside the session).
+   - The full model-facing tool-result payload is written to `<session-dir>/<spool_dir>/output_<call_id>.txt` (default `spool/output_<call_id>.txt` inside the session). The human log records both the raw tool output and the exact model-visible content.
    - The agent receives the beginning and end of the output, along with a note pointing to the spooled file for surgical inspection using `read_file`.
    - Both the full raw output and the exact model-visible content are recorded in the human and trace logs.
 

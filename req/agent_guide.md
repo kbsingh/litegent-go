@@ -154,7 +154,7 @@ Context management is critical to prevent token exhaustion and context window ov
 ### 3.1 Tool Output Truncation
 - Truncation runs only when `manage_context && truncate_tool_outputs`; `max_tool_output_chars` defaults to 4000.
 - When a tool return is oversized:
-  - Save the complete output into `<session-dir>/<spool_dir>/output_<call_id>.txt` (default `spool/` inside the session).
+  - Save the complete model-facing tool-result payload into `<session-dir>/<spool_dir>/output_<call_id>.txt` (default `spool/` inside the session). The human log still records the raw tool output separately.
   - Return a spliced response with 60% head, a truncation banner naming the omitted count and spool path, and 30% tail.
   - Log both the full raw output and the exact model-visible content.
 
