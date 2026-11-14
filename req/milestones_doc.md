@@ -135,8 +135,8 @@ litegent [-s <file>] -i [-c <file>] [-k <dir>] [-v] [-r <session-id> | --resume-
 | 4. Durable context blob | Complete | `251aa4b` |
 | 5. Resume | Complete | `582d500` |
 | 6. Durability and failure hardening | Complete | `e5a9527` |
-| 7. Documentation and migration | Complete | docs commit |
-| 8. Final verification | Complete | verification commit |
+| 7. Documentation and migration | Complete | `28e1eb8` |
+| 8. Final verification | Complete | verified at `28e1eb8` |
 
 ---
 
