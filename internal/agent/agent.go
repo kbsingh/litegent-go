@@ -126,6 +126,9 @@ func (a *Agent) RunWithHistory(ctx context.Context, history []llm.Message, userP
 	messages := append([]llm.Message(nil), history...)
 	messages = append(messages, llm.Message{Role: llm.RoleUser, Content: userPrompt})
 	_ = a.Logger.LogUserPrompt(turn, userPrompt)
+	if err := a.Logger.Err(); err != nil {
+		return Result{Outcome: OutcomeStorageError, Steps: 0, Err: err}
+	}
 	if err := a.saveContext(turn, 0, messages); err != nil {
 		_ = a.Logger.LogTurnEnd(turn, OutcomeStorageError.String(), 0, 0)
 		return Result{Outcome: OutcomeStorageError, Steps: 0, Err: err}
@@ -186,6 +189,9 @@ func (a *Agent) RunInteractiveWithHistory(
 		}
 		turn++
 		_ = a.Logger.LogUserPrompt(turn, prompt)
+		if err := a.Logger.Err(); err != nil {
+			return Result{Outcome: OutcomeStorageError, Steps: totalSteps, TotalTokens: totalTokens, Err: err}
+		}
 
 		messages = append(messages, llm.Message{Role: llm.RoleUser, Content: prompt})
 		if err := a.saveContext(turn, 0, messages); err != nil {
@@ -240,6 +246,9 @@ func (a *Agent) runTurn(ctx context.Context, messages []llm.Message, turn int) (
 			_ = a.Logger.LogSessionError(turn, step, "interrupted: "+err.Error())
 			_ = a.Logger.LogTurnEnd(turn, OutcomeInterrupted.String(), step, totalTokens)
 			return messages, Result{Outcome: OutcomeInterrupted, Steps: step, TotalTokens: totalTokens, Err: err}
+		}
+		if err := a.Logger.Err(); err != nil {
+			return messages, Result{Outcome: OutcomeStorageError, Steps: step, TotalTokens: totalTokens, Err: err}
 		}
 
 		if a.Config.ManageContext {
@@ -297,6 +306,9 @@ func (a *Agent) runTurn(ctx context.Context, messages []llm.Message, turn int) (
 			_ = a.Logger.LogFinish(turn, step, choice.Message.Content, step+1, totalTokens)
 			_ = a.Logger.LogTurnEnd(turn, OutcomeSuccess.String(), step+1, totalTokens)
 			a.Progress.TurnEnd(turn, OutcomeSuccess.String(), step+1)
+			if err := a.Logger.Err(); err != nil {
+				return messages, Result{Outcome: OutcomeStorageError, Steps: step + 1, TotalTokens: totalTokens, Err: err}
+			}
 			return messages, Result{Outcome: OutcomeSuccess, FinalMessage: choice.Message.Content, Steps: step + 1, TotalTokens: totalTokens}
 		}
 
@@ -319,6 +331,9 @@ func (a *Agent) runTurn(ctx context.Context, messages []llm.Message, turn int) (
 	_ = a.Logger.LogSessionError(turn, step, fmt.Sprintf("max_steps (%d) exceeded without a final response", a.Config.MaxSteps))
 	_ = a.Logger.LogTurnEnd(turn, OutcomeMaxStepsExceeded.String(), step, totalTokens)
 	a.Progress.TurnEnd(turn, OutcomeMaxStepsExceeded.String(), step)
+	if err := a.Logger.Err(); err != nil {
+		return messages, Result{Outcome: OutcomeStorageError, Steps: step, TotalTokens: totalTokens, Err: err}
+	}
 	return messages, Result{Outcome: OutcomeMaxStepsExceeded, Steps: step, TotalTokens: totalTokens}
 }
 

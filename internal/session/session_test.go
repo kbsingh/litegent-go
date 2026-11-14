@@ -340,3 +340,51 @@ func TestSetTurnCount(t *testing.T) {
 		t.Errorf("TurnCount = %d, want 7", m.TurnCount)
 	}
 }
+
+func TestFinishRunAndIncompleteDetection(t *testing.T) {
+	top := t.TempDir()
+	info, err := create(top, Options{}, func() string { return "brave-otter-runs" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveContext(info, []llm.Message{{Role: llm.RoleSystem, Content: "system"}}); err != nil {
+		t.Fatal(err)
+	}
+	// Leave the first run unfinished, then resume.
+	if err := info.Close(); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := Resume(top, info.ID, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resumed.PreviousRunUnfinished {
+		t.Error("PreviousRunUnfinished = false, want true")
+	}
+	if err := FinishRun(resumed, "success", 0); err != nil {
+		t.Fatal(err)
+	}
+	m, err := LoadManifest(resumed.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Runs) != 2 {
+		t.Fatalf("expected 2 run records, got %d", len(m.Runs))
+	}
+	last := m.Runs[len(m.Runs)-1]
+	if last.RunID != resumed.RunID || last.FinishedAt == nil || last.Outcome != "success" || last.ExitCode == nil || *last.ExitCode != 0 {
+		t.Errorf("unexpected finished run record: %+v", last)
+	}
+	if err := resumed.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	next, err := Resume(top, info.ID, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer next.Close()
+	if next.PreviousRunUnfinished {
+		t.Error("PreviousRunUnfinished = true, want false after a completed run")
+	}
+}

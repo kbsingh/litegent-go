@@ -37,15 +37,16 @@ type Options struct {
 
 // Info describes the on-disk layout for one session run.
 type Info struct {
-	ID           string
-	RunID        string
-	Dir          string
-	ManifestPath string
-	ContextPath  string
-	LogDir       string
-	SpoolDir     string
-	LockPath     string
-	Lock         *Lock
+	ID                    string
+	RunID                 string
+	Dir                   string
+	ManifestPath          string
+	ContextPath           string
+	LogDir                string
+	SpoolDir              string
+	LockPath              string
+	Lock                  *Lock
+	PreviousRunUnfinished bool
 }
 
 // Close releases the session lock. It is safe to call more than once.
@@ -56,17 +57,27 @@ func (i *Info) Close() error {
 	return i.Lock.Release()
 }
 
+// RunRecord describes one invocation of a session.
+type RunRecord struct {
+	RunID      string     `json:"run_id"`
+	StartedAt  time.Time  `json:"started_at"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
+	Outcome    string     `json:"outcome,omitempty"`
+	ExitCode   *int       `json:"exit_code,omitempty"`
+}
+
 // Manifest is the durable metadata for a session. It intentionally never
 // contains prompts, message content, or credentials.
 type Manifest struct {
-	Version    int       `json:"version"`
-	ID         string    `json:"id"`
-	CreatedAt  time.Time `json:"created_at"`
-	LastUsedAt time.Time `json:"last_used_at"`
-	RunCount   int       `json:"run_count"`
-	TurnCount  int       `json:"turn_count"`
-	Model      string    `json:"model,omitempty"`
-	BaseURL    string    `json:"base_url,omitempty"`
+	Version    int         `json:"version"`
+	ID         string      `json:"id"`
+	CreatedAt  time.Time   `json:"created_at"`
+	LastUsedAt time.Time   `json:"last_used_at"`
+	RunCount   int         `json:"run_count"`
+	TurnCount  int         `json:"turn_count"`
+	Model      string      `json:"model,omitempty"`
+	BaseURL    string      `json:"base_url,omitempty"`
+	Runs       []RunRecord `json:"runs,omitempty"`
 }
 
 var runCounter atomic.Uint64
@@ -161,6 +172,7 @@ func initialize(dir, id string, opts Options) (info *Info, err error) {
 	}
 
 	now := time.Now().UTC()
+	runID := NewRunID()
 	manifest := Manifest{
 		Version:    manifestVersion,
 		ID:         id,
@@ -170,6 +182,10 @@ func initialize(dir, id string, opts Options) (info *Info, err error) {
 		TurnCount:  0,
 		Model:      opts.Model,
 		BaseURL:    opts.BaseURL,
+		Runs: []RunRecord{{
+			RunID:     runID,
+			StartedAt: now,
+		}},
 	}
 	manifestPath := filepath.Join(dir, ManifestName)
 	if err := writeManifest(manifestPath, manifest); err != nil {
@@ -178,7 +194,7 @@ func initialize(dir, id string, opts Options) (info *Info, err error) {
 
 	return &Info{
 		ID:           id,
-		RunID:        NewRunID(),
+		RunID:        runID,
 		Dir:          dir,
 		ManifestPath: manifestPath,
 		ContextPath:  filepath.Join(dir, ContextName),
@@ -309,22 +325,30 @@ func openLocked(dir, id string, opts Options, lock *Lock) (*Info, error) {
 		return nil, err
 	}
 
-	m.LastUsedAt = time.Now().UTC()
+	previousUnfinished := false
+	if len(m.Runs) > 0 && m.Runs[len(m.Runs)-1].FinishedAt == nil {
+		previousUnfinished = true
+	}
+	now := time.Now().UTC()
+	runID := NewRunID()
+	m.LastUsedAt = now
 	m.RunCount++
+	m.Runs = append(m.Runs, RunRecord{RunID: runID, StartedAt: now})
 	if err := writeManifest(filepath.Join(dir, ManifestName), m); err != nil {
 		return nil, err
 	}
 
 	return &Info{
-		ID:           id,
-		RunID:        NewRunID(),
-		Dir:          dir,
-		ManifestPath: filepath.Join(dir, ManifestName),
-		ContextPath:  contextPath,
-		LogDir:       logDir,
-		SpoolDir:     spoolDir,
-		LockPath:     filepath.Join(dir, LockName),
-		Lock:         lock,
+		ID:                    id,
+		RunID:                 runID,
+		Dir:                   dir,
+		PreviousRunUnfinished: previousUnfinished,
+		ManifestPath:          filepath.Join(dir, ManifestName),
+		ContextPath:           contextPath,
+		LogDir:                logDir,
+		SpoolDir:              spoolDir,
+		LockPath:              filepath.Join(dir, LockName),
+		Lock:                  lock,
 	}, nil
 }
 
@@ -402,5 +426,28 @@ func SetTurnCount(info *Info, turn int) error {
 	return UpdateManifest(info, func(m *Manifest) {
 		m.TurnCount = turn
 		m.LastUsedAt = time.Now().UTC()
+	})
+}
+
+// FinishRun records the outcome of the current run in the session
+// manifest. It is safe to call after a partial startup failure; if the run
+// record is missing, an error is returned.
+func FinishRun(info *Info, outcome string, exitCode int) error {
+	if info == nil {
+		return fmt.Errorf("session info must not be nil")
+	}
+	return UpdateManifest(info, func(m *Manifest) {
+		now := time.Now().UTC()
+		for i := range m.Runs {
+			if m.Runs[i].RunID != info.RunID {
+				continue
+			}
+			m.Runs[i].FinishedAt = &now
+			m.Runs[i].Outcome = outcome
+			code := exitCode
+			m.Runs[i].ExitCode = &code
+			break
+		}
+		m.LastUsedAt = now
 	})
 }

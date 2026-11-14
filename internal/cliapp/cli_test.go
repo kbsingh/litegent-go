@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"litegent/internal/llm"
+	"litegent/internal/logging"
 	"litegent/internal/session"
 )
 
@@ -770,6 +772,16 @@ func TestRun_CreatesSessionLayout(t *testing.T) {
 	if last.Role != llm.RoleAssistant || last.Content != "done" {
 		t.Errorf("context does not end with the final assistant answer: %+v", last)
 	}
+	manifest, err := session.LoadManifest(sessionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Runs) != 1 || manifest.Runs[0].FinishedAt == nil {
+		t.Fatalf("run record was not finalized: %+v", manifest.Runs)
+	}
+	if manifest.Runs[0].Outcome != "success" || manifest.Runs[0].ExitCode == nil || *manifest.Runs[0].ExitCode != 0 {
+		t.Errorf("unexpected run outcome: %+v", manifest.Runs[0])
+	}
 }
 
 func TestRun_ResumeRestoresContextAndAppends(t *testing.T) {
@@ -1069,5 +1081,72 @@ func TestRun_ResumeInteractiveContinuesHistory(t *testing.T) {
 	}
 	if !sawFirst || !sawSecond {
 		t.Errorf("resumed interactive request missing prior or new turn: %+v", req.Messages)
+	}
+}
+
+func TestFinalizeRunRecordsInterruptedOutcome(t *testing.T) {
+	dir := t.TempDir()
+	info, err := session.Create(dir, session.Options{Model: "test-model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer info.Close()
+	logger, err := logging.NewWithRunID(info.LogDir, "", info.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logger.Close()
+
+	code := finalizeRun(info, logger, "interrupted", ExitInterrupted, 3, 100, io.Discard)
+	if code != ExitInterrupted {
+		t.Errorf("finalizeRun code = %d, want %d", code, ExitInterrupted)
+	}
+	m, err := session.LoadManifest(info.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Runs) != 1 || m.Runs[0].FinishedAt == nil {
+		t.Fatalf("run not finalized: %+v", m.Runs)
+	}
+	if m.Runs[0].Outcome != "interrupted" || m.Runs[0].ExitCode == nil || *m.Runs[0].ExitCode != ExitInterrupted {
+		t.Errorf("unexpected run record: %+v", m.Runs[0])
+	}
+}
+
+func TestRun_ResumeWarnsOnIncompletePreviousRun(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(llm.ChatResponse{
+			Choices: []llm.Choice{{Message: llm.Message{Role: llm.RoleAssistant, Content: "ok"}, FinishReason: "stop"}},
+		})
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	info, err := session.Create(dir, session.Options{Model: "test-model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &session.Store{Info: info}
+	if err := store.SaveContext([]llm.Message{{Role: llm.RoleSystem, Content: "system"}}); err != nil {
+		t.Fatal(err)
+	}
+	sessionID := info.ID
+	if err := info.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgPath := writeFile(t, dir, "config.json", `{
+  "base_url": "`+server.URL+`",
+  "model": "test-model"
+}`)
+	promptPath := writeFile(t, dir, "prompt.txt", "task")
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"-p", promptPath, "-c", cfgPath, "-r", sessionID}, strings.NewReader(""), &stdout, &stderr)
+	if code != ExitSuccess {
+		t.Fatalf("resume failed: code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "previous run did not finish") {
+		t.Errorf("expected incomplete-run warning, got: %q", stderr.String())
 	}
 }

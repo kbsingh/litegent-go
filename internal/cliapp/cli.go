@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -208,7 +209,18 @@ func parseArgs(argv []string) (*cliArgs, error) {
 // executes the agentic loop (single-shot, or interactive if -i is set),
 // writing output to stdout/stderr and reading interactive prompts from
 // stdin. It returns the process exit code.
-func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
+func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int) {
+	var (
+		logger *logging.Logger
+		sess   *session.Info
+	)
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(stderr, "litegent: panic: %v\n%s\n", r, debug.Stack())
+			exitCode = ExitConfigOrCLIError
+		}
+	}()
+
 	args, err := parseArgs(argv)
 	if err != nil {
 		fmt.Fprintf(stderr, "litegent: %v\n\n%s", err, usage)
@@ -345,7 +357,6 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		BaseURL:     cfg.BaseURL,
 	}
 	var (
-		sess      *session.Info
 		store     *session.Store
 		history   []llm.Message
 		startTurn int
@@ -382,6 +393,9 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return ExitConfigOrCLIError
 		}
 		startTurn = manifest.TurnCount
+		if sess.PreviousRunUnfinished {
+			fmt.Fprintln(stderr, "litegent: warning: the previous run did not finish; resuming from the last valid context")
+		}
 		fmt.Fprintf(stderr, "litegent: resumed session %s (%s)\n", sess.ID, sess.Dir)
 	} else {
 		sess, err = session.Create(cfg.TopDir, opts)
@@ -401,12 +415,24 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	cfg.LogDir = sess.LogDir
 	cfg.ContextConfig.SpoolDir = sess.SpoolDir
 
-	logger, err := logging.NewWithRunID(sess.LogDir, cfg.APIKey, sess.RunID)
+	logger, err = logging.NewWithRunID(sess.LogDir, cfg.APIKey, sess.RunID)
 	if err != nil {
 		fmt.Fprintf(stderr, "litegent: initializing logger: %v\n", err)
 		return ExitConfigOrCLIError
 	}
-	defer logger.Close()
+	defer func() {
+		if err := logger.Close(); err != nil {
+			fmt.Fprintf(stderr, "litegent: closing logs: %v\n", err)
+		}
+	}()
+	defer func() {
+		if r := recover(); r != nil {
+			msg := fmt.Sprintf("panic: %v\n%s", r, debug.Stack())
+			fmt.Fprintf(stderr, "litegent: %s\n", msg)
+			_ = logger.LogSessionError(0, 0, msg)
+			exitCode = finalizeRun(sess, logger, "panic", ExitConfigOrCLIError, 0, 0, stderr)
+		}
+	}()
 
 	registry := buildRegistry(cfg)
 	llmClient := llm.NewClient(cfg)
@@ -417,12 +443,32 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	prog.ShowToolCalls = args.interactive
 	ag.Progress = prog
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	go func() {
+		select {
+		case <-sigCh:
+			cancel()
+			select {
+			case <-sigCh:
+				// Second signal: sync best-effort and exit immediately.
+				if logger != nil {
+					_ = logger.Sync()
+				}
+				os.Exit(ExitInterrupted)
+			case <-ctx.Done():
+			}
+		case <-ctx.Done():
+		}
+	}()
 
 	workDir, _ := os.Getwd()
-	if err := logger.LogSessionStart(sess.ID, sess.RunID, resuming, cfg.Model, cfg.BaseURL, workDir, systemPrompt); err != nil && args.verbose {
-		fmt.Fprintf(stderr, "litegent: warning: failed to write session start: %v\n", err)
+	if err := logger.LogSessionStart(sess.ID, sess.RunID, resuming, cfg.Model, cfg.BaseURL, workDir, systemPrompt); err != nil {
+		fmt.Fprintf(stderr, "litegent: writing session start: %v\n", err)
+		return finalizeRun(sess, logger, "storage_error", ExitConfigOrCLIError, 0, 0, stderr)
 	}
 	prog.Startup(cfg.Model, cfg.BaseURL, len(registry.Schemas()), args.interactive)
 	if args.verbose {
@@ -439,7 +485,7 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	prog.SessionEnd(result.Outcome.String(), result.Steps)
 
-	exitCode := ExitSuccess
+	exitCode = ExitSuccess
 	switch result.Outcome {
 	case agent.OutcomeSuccess:
 		fmt.Fprintln(stdout, result.FinalMessage)
@@ -457,8 +503,7 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "litegent: fatal LLM error: %v\n", result.Err)
 		exitCode = ExitLLMAPIError
 	}
-	_ = logger.LogRunEnd(result.Outcome.String(), exitCode, result.Steps, result.TotalTokens)
-	return exitCode
+	return finalizeRun(sess, logger, result.Outcome.String(), exitCode, result.Steps, result.TotalTokens, stderr)
 }
 
 // runInteractive drives a persistent, multi-turn session: it reads one
@@ -541,8 +586,7 @@ func runInteractive(ctx context.Context, ag *agent.Agent, history []llm.Message,
 	default: // a session that ends via EOF/"/exit" or after a recoverable max_steps turn is a clean exit
 		exitCode = ExitSuccess
 	}
-	_ = logger.LogRunEnd(result.Outcome.String(), exitCode, result.Steps, result.TotalTokens)
-	return exitCode
+	return finalizeRun(sess, logger, result.Outcome.String(), exitCode, result.Steps, result.TotalTokens, stderr)
 }
 
 // buildRegistry registers the enabled built-in tools per cfg.Tools. All
@@ -566,4 +610,38 @@ func buildRegistry(cfg config.LitegentConfig) *tools.Registry {
 	}
 
 	return registry
+}
+
+// finalizeRun records the run outcome, writes the run footer, and syncs
+// logs. It is used on normal completion, errors, interrupts, and panics.
+func finalizeRun(sess *session.Info, logger *logging.Logger, outcome string, exitCode, steps, tokens int, stderr io.Writer) int {
+	if logger != nil {
+		if err := logger.LogRunEnd(outcome, exitCode, steps, tokens); err != nil {
+			fmt.Fprintf(stderr, "litegent: writing run end: %v\n", err)
+			if exitCode == ExitSuccess {
+				exitCode = ExitConfigOrCLIError
+			}
+		}
+		if err := logger.Sync(); err != nil {
+			fmt.Fprintf(stderr, "litegent: syncing logs: %v\n", err)
+			if exitCode == ExitSuccess {
+				exitCode = ExitConfigOrCLIError
+			}
+		}
+		if err := logger.Err(); err != nil {
+			fmt.Fprintf(stderr, "litegent: audit log error: %v\n", err)
+			if exitCode == ExitSuccess {
+				exitCode = ExitConfigOrCLIError
+			}
+		}
+	}
+	if sess != nil {
+		if err := session.FinishRun(sess, outcome, exitCode); err != nil {
+			fmt.Fprintf(stderr, "litegent: finalizing session: %v\n", err)
+			if exitCode == ExitSuccess {
+				exitCode = ExitConfigOrCLIError
+			}
+		}
+	}
+	return exitCode
 }

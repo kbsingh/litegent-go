@@ -54,6 +54,7 @@ type Logger struct {
 	traceFile   *os.File
 	sessionFile *os.File
 	apiKey      string // redacted from every logged string
+	err         error  // first write/sync error, never cleared
 
 	RunID       string
 	TracePath   string
@@ -118,8 +119,11 @@ func (l *Logger) Sync() error {
 		if f == nil {
 			continue
 		}
-		if err := f.Sync(); err != nil && first == nil {
-			first = err
+		if err := f.Sync(); err != nil {
+			l.recordErr(err)
+			if first == nil {
+				first = err
+			}
 		}
 	}
 	return first
@@ -134,14 +138,34 @@ func (l *Logger) Close() error {
 		if f == nil {
 			continue
 		}
-		if err := f.Sync(); err != nil && first == nil {
-			first = err
+		if err := f.Sync(); err != nil {
+			l.recordErr(err)
+			if first == nil {
+				first = err
+			}
 		}
-		if err := f.Close(); err != nil && first == nil {
-			first = err
+		if err := f.Close(); err != nil {
+			l.recordErr(err)
+			if first == nil {
+				first = err
+			}
 		}
 	}
 	return first
+}
+
+// Err returns the first log write or sync error observed.
+func (l *Logger) Err() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.err
+}
+
+// recordErr must be called with l.mu held.
+func (l *Logger) recordErr(err error) {
+	if err != nil && l.err == nil {
+		l.err = err
+	}
 }
 
 func nowUTC() string { return time.Now().UTC().Format(time.RFC3339Nano) }
@@ -202,6 +226,7 @@ func (l *Logger) logTrace(turn int, eventType string, step int, data map[string]
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	_, err = l.traceFile.Write(append(b, '\n'))
+	l.recordErr(err)
 	return err
 }
 
@@ -209,6 +234,7 @@ func (l *Logger) writeSession(s string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	_, err := l.sessionFile.WriteString(l.redact(s))
+	l.recordErr(err)
 	return err
 }
 

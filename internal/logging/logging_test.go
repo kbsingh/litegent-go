@@ -280,3 +280,16 @@ func TestLogFinish(t *testing.T) {
 		t.Errorf("expected final response in session log: %q", session)
 	}
 }
+
+func TestLoggerErrRecordsWriteFailure(t *testing.T) {
+	l := newTestLogger(t, "")
+	if err := l.traceFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.LogUserPrompt(1, "prompt"); err == nil {
+		t.Fatal("expected write to a closed trace file to fail")
+	}
+	if l.Err() == nil {
+		t.Fatal("expected Logger.Err to record the write failure")
+	}
+}
