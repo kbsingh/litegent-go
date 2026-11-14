@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,6 +22,35 @@ func writeFile(t *testing.T, dir, name, content string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// assertRunLogs walks root and requires at least one trace and one human
+// session log. It works both before sessions exist (logs under top_dir)
+// and after they are introduced (logs under top_dir/<session-id>/logs).
+func assertRunLogs(t *testing.T, root string) {
+	t.Helper()
+	var traces, sessions int
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		switch {
+		case strings.HasPrefix(d.Name(), "trace_") && strings.HasSuffix(d.Name(), ".jsonl"):
+			traces++
+		case strings.HasPrefix(d.Name(), "session_") && strings.HasSuffix(d.Name(), ".log"):
+			sessions++
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking %s for logs: %v", root, err)
+	}
+	if traces == 0 || sessions == 0 {
+		t.Fatalf("expected trace and session logs under %s, got traces=%d sessions=%d", root, traces, sessions)
+	}
 }
 
 func TestRun_Version(t *testing.T) {
@@ -77,11 +107,9 @@ func TestRun_DefaultConfigLocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFile(t, litegentDir, defaultSystemPromptFileName, "home system prompt")
-	logDir := filepath.Join(home, "logs")
 	writeFile(t, litegentDir, defaultConfigFileName, `{
   "base_url": "`+server.URL+`",
-  "model": "test-model",
-  "log_dir": "`+logDir+`"
+  "model": "test-model"
 }`)
 	promptPath := writeFile(t, home, "prompt.txt", "task")
 
@@ -93,9 +121,7 @@ func TestRun_DefaultConfigLocation(t *testing.T) {
 	if seenSystem != "home system prompt" {
 		t.Errorf("system prompt = %q, want the ~/.litegent/system.md contents", seenSystem)
 	}
-	if entries, err := os.ReadDir(logDir); err != nil || len(entries) == 0 {
-		t.Errorf("expected logs under the config's log_dir, err=%v entries=%d", err, len(entries))
-	}
+	assertRunLogs(t, home)
 }
 
 func TestRun_CreatesDefaultFiles(t *testing.T) {
@@ -165,6 +191,9 @@ func TestRun_CreatesDefaultFiles(t *testing.T) {
 }
 
 func TestRun_DefaultSystemPromptFallback(t *testing.T) {
+	// The config lives in a temp directory and omits top_dir, so top_dir
+	// defaults to that directory and system.md is created beside it.
+
 	var seenSystem string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req llm.ChatRequest
@@ -182,11 +211,9 @@ func TestRun_DefaultSystemPromptFallback(t *testing.T) {
 	t.Setenv("HOME", home)
 	dir := t.TempDir()
 	promptPath := writeFile(t, dir, "prompt.txt", "task")
-	logDir := filepath.Join(dir, "logs")
 	cfgPath := writeFile(t, dir, "config.json", `{
   "base_url": "`+server.URL+`",
-  "model": "test-model",
-  "log_dir": "`+logDir+`"
+  "model": "test-model"
 }`)
 
 	var stdout, stderr bytes.Buffer
@@ -197,6 +224,9 @@ func TestRun_DefaultSystemPromptFallback(t *testing.T) {
 	if seenSystem != defaultSystemPrompt {
 		t.Errorf("system prompt = %q, want built-in default %q", seenSystem, defaultSystemPrompt)
 	}
+	if _, err := os.Stat(filepath.Join(dir, defaultSystemPromptFileName)); err != nil {
+		t.Errorf("expected default system prompt beside the config at %s: %v", dir, err)
+	}
 }
 
 func TestRun_ExplicitSystemPromptDoesNotCreateDefault(t *testing.T) {
@@ -204,16 +234,20 @@ func TestRun_ExplicitSystemPromptDoesNotCreateDefault(t *testing.T) {
 	t.Setenv("HOME", home)
 	dir := t.TempDir()
 	systemPath := writeFile(t, dir, "system.txt", "explicit system prompt")
-	cfgPath := writeFile(t, dir, "config.json", `{"log_dir": "`+filepath.Join(dir, "logs")+`"}`)
+	cfgPath := writeFile(t, dir, "config.json", `{"model": "gpt-4o"}`)
 
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"-s", systemPath, "-i", "-c", cfgPath}, strings.NewReader(""), &stdout, &stderr)
 	if code != ExitSuccess {
 		t.Fatalf("exit code = %d, want %d, stderr: %s", code, ExitSuccess, stderr.String())
 	}
-	defaultPath := filepath.Join(home, defaultDirName, defaultSystemPromptFileName)
-	if _, err := os.Stat(defaultPath); err == nil {
-		t.Errorf("explicit -s must not create %s", defaultPath)
+	for _, defaultPath := range []string{
+		filepath.Join(dir, defaultSystemPromptFileName),
+		filepath.Join(home, defaultDirName, defaultSystemPromptFileName),
+	} {
+		if _, err := os.Stat(defaultPath); err == nil {
+			t.Errorf("explicit -s must not create %s", defaultPath)
+		}
 	}
 	if strings.Contains(stderr.String(), "created default system prompt") {
 		t.Errorf("explicit -s must not report creating a default prompt, got: %q", stderr.String())
@@ -305,13 +339,11 @@ func TestRun_EndToEndSuccess(t *testing.T) {
 	dir := t.TempDir()
 	systemPath := writeFile(t, dir, "system.txt", "you are a helpful agent")
 	promptPath := writeFile(t, dir, "prompt.txt", "say hello")
-	logDir := filepath.Join(dir, "logs")
 	cfgPath := writeFile(t, dir, "config.json", `{
   "base_url": "`+server.URL+`",
   "api_key": "test-key",
   "model": "test-model",
-  "max_steps": 5,
-  "log_dir": "`+logDir+`"
+  "max_steps": 5
 }`)
 
 	var stdout, stderr bytes.Buffer
@@ -326,16 +358,12 @@ func TestRun_EndToEndSuccess(t *testing.T) {
 		t.Errorf("expected turn separator after the final message, got: %q", stdout.String())
 	}
 
-	entries, err := os.ReadDir(logDir)
-	if err != nil {
-		t.Fatalf("expected log directory to be created: %v", err)
-	}
-	if len(entries) < 2 {
-		t.Errorf("expected at least a trace and session log file, got %d entries", len(entries))
-	}
+	assertRunLogs(t, dir)
 }
 
 func TestRun_DefaultSystemPrompt(t *testing.T) {
+	// top_dir defaults to the config's directory, so system.md is created
+	// beside config.json and contains the built-in prompt.
 	var seenSystem string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req llm.ChatRequest
@@ -351,11 +379,9 @@ func TestRun_DefaultSystemPrompt(t *testing.T) {
 
 	dir := t.TempDir()
 	promptPath := writeFile(t, dir, "prompt.txt", "task")
-	logDir := filepath.Join(dir, "logs")
 	cfgPath := writeFile(t, dir, "config.json", `{
   "base_url": "`+server.URL+`",
-  "model": "test-model",
-  "log_dir": "`+logDir+`"
+  "model": "test-model"
 }`)
 
 	var stdout, stderr bytes.Buffer
@@ -388,11 +414,9 @@ func TestRun_SkillsInjectedIntoSystemPrompt(t *testing.T) {
 	skillsDir := filepath.Join(dir, "skills")
 	os.MkdirAll(skillsDir, 0o755)
 	writeFile(t, skillsDir, "git.md", "# Git Workflow\nAlways check status first.\n")
-	logDir := filepath.Join(dir, "logs")
 	cfgPath := writeFile(t, dir, "config.json", `{
   "base_url": "`+server.URL+`",
-  "model": "test-model",
-  "log_dir": "`+logDir+`"
+  "model": "test-model"
 }`)
 
 	var stdout, stderr bytes.Buffer
@@ -424,8 +448,7 @@ func TestRun_InteractiveConflictsWithPrompt(t *testing.T) {
 func TestRun_InteractiveDoesNotRequirePromptFile(t *testing.T) {
 	dir := t.TempDir()
 	systemPath := writeFile(t, dir, "system.txt", "you are an agent")
-	logDir := filepath.Join(dir, "logs")
-	cfgPath := writeFile(t, dir, "config.json", `{"model": "gpt-4o", "log_dir": "`+logDir+`"}`)
+	cfgPath := writeFile(t, dir, "config.json", `{"model": "gpt-4o"}`)
 
 	var stdout, stderr bytes.Buffer
 	// No LLM endpoint reachable, but stdin is empty (immediate EOF), so
@@ -459,11 +482,9 @@ func TestRun_InteractiveMultipleTurns(t *testing.T) {
 
 	dir := t.TempDir()
 	systemPath := writeFile(t, dir, "system.txt", "you are an agent")
-	logDir := filepath.Join(dir, "logs")
 	cfgPath := writeFile(t, dir, "config.json", `{
   "base_url": "`+server.URL+`",
-  "model": "test-model",
-  "log_dir": "`+logDir+`"
+  "model": "test-model"
 }`)
 
 	stdin := strings.NewReader("first question\nsecond question\n/exit\n")
@@ -518,11 +539,9 @@ func TestRun_InteractiveToolCallNotices(t *testing.T) {
 
 	dir := t.TempDir()
 	systemPath := writeFile(t, dir, "system.txt", "you are an agent")
-	logDir := filepath.Join(dir, "logs")
 	cfgPath := writeFile(t, dir, "config.json", `{
   "base_url": "`+server.URL+`",
-  "model": "test-model",
-  "log_dir": "`+logDir+`"
+  "model": "test-model"
 }`)
 
 	run := func(verbose bool) (string, string) {
@@ -568,11 +587,9 @@ func TestRun_InteractiveEOFEndsSessionCleanly(t *testing.T) {
 
 	dir := t.TempDir()
 	systemPath := writeFile(t, dir, "system.txt", "you are an agent")
-	logDir := filepath.Join(dir, "logs")
 	cfgPath := writeFile(t, dir, "config.json", `{
   "base_url": "`+server.URL+`",
-  "model": "test-model",
-  "log_dir": "`+logDir+`"
+  "model": "test-model"
 }`)
 
 	// No trailing /exit — just EOF after one line.
@@ -597,11 +614,9 @@ func TestRun_InteractiveVerboseProgress(t *testing.T) {
 
 	dir := t.TempDir()
 	systemPath := writeFile(t, dir, "system.txt", "you are an agent")
-	logDir := filepath.Join(dir, "logs")
 	cfgPath := writeFile(t, dir, "config.json", `{
   "base_url": "`+server.URL+`",
-  "model": "test-model",
-  "log_dir": "`+logDir+`"
+  "model": "test-model"
 }`)
 
 	stdin := strings.NewReader("hello\n/exit\n")
@@ -620,4 +635,49 @@ func TestRun_InteractiveVerboseProgress(t *testing.T) {
 	if !strings.Contains(errOut, "session ended") {
 		t.Errorf("expected session-end progress line, got: %q", errOut)
 	}
+}
+
+func TestRun_CustomTopDirHonorsConfig(t *testing.T) {
+	var seenSystem string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req llm.ChatRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		if len(req.Messages) > 0 {
+			seenSystem = req.Messages[0].Content
+		}
+		json.NewEncoder(w).Encode(llm.ChatResponse{
+			Choices: []llm.Choice{{Message: llm.Message{Role: llm.RoleAssistant, Content: "done"}, FinishReason: "stop"}},
+		})
+	}))
+	defer server.Close()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := t.TempDir()
+	top := filepath.Join(dir, "custom-top")
+	promptPath := writeFile(t, dir, "prompt.txt", "task")
+	cfgPath := writeFile(t, dir, "config.json", `{
+  "top_dir": "`+top+`",
+  "base_url": "`+server.URL+`",
+  "model": "test-model"
+}`)
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"-p", promptPath, "-c", cfgPath}, strings.NewReader(""), &stdout, &stderr)
+	if code != ExitSuccess {
+		t.Fatalf("exit code = %d, want %d, stderr: %s", code, ExitSuccess, stderr.String())
+	}
+	if seenSystem != defaultSystemPrompt {
+		t.Errorf("system prompt = %q, want built-in default %q", seenSystem, defaultSystemPrompt)
+	}
+	if _, err := os.Stat(filepath.Join(top, defaultSystemPromptFileName)); err != nil {
+		t.Errorf("expected system prompt under custom top_dir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, defaultDirName, defaultSystemPromptFileName)); err == nil {
+		t.Error("custom top_dir must not create ~/.litegent/system.md")
+	}
+	if _, err := os.Stat(filepath.Join(home, defaultDirName, defaultConfigFileName)); err == nil {
+		t.Error("custom top_dir must not create ~/.litegent/config.json")
+	}
+	assertRunLogs(t, top)
 }

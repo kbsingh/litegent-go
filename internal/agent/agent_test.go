@@ -495,3 +495,31 @@ func TestAgent_RunInteractive_LoopGuardResetsPerTurn(t *testing.T) {
 		t.Fatal("expected to find call c4's tool result in the request history")
 	}
 }
+
+func TestAgent_TruncationCanBeDisabled(t *testing.T) {
+	server := newScriptedServer(
+		toolCallResponse("call_1", "big_tool", `{}`),
+		finalResponse("ok"),
+	)
+	registry := tools.NewRegistry()
+	bigOutput := strings.Repeat("x", 10000)
+	registry.Register(&fakeTool{name: "big_tool", fn: func(n int, args map[string]any) *tools.ToolResult {
+		return &tools.ToolResult{Success: true, Output: bigOutput}
+	}})
+
+	a := newTestAgent(t, server, registry, func(c *config.LitegentConfig) {
+		c.ContextConfig.TruncateToolOutputs = false
+		c.ContextConfig.SpoolDir = t.TempDir()
+	})
+	result := a.Run(context.Background(), "system", "task")
+	if result.Outcome != OutcomeSuccess {
+		t.Fatalf("Outcome = %v, want OutcomeSuccess, err: %v", result.Outcome, result.Err)
+	}
+
+	last := server.lastRequest()
+	for _, m := range last.Messages {
+		if m.Role == llm.RoleTool && strings.Contains(m.Content, "TRUNCATED") {
+			t.Error("truncation must be disabled, but tool output carried a TRUNCATED notice")
+		}
+	}
+}

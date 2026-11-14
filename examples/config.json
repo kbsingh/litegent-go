@@ -1,4 +1,5 @@
 {
+  "top_dir": "~/.litegent",
   "base_url": "https://api.openai.com/v1",
   "api_key": "${OPENAI_API_KEY}",
   "model": "gpt-4o",
@@ -11,12 +12,14 @@
   "max_repeated_tool_calls": 3,
   "manage_context": true,
   "context_config": {
-    "max_context_tokens": 16000,
+    "max_context_tokens": 32000,
+    "truncate_tool_outputs": true,
     "max_tool_output_chars": 4000,
-    "window_size": 20,
-    "spool_dir": ".tmp/tool_outputs"
+    "window_size": 40,
+    "spool_dir": "spool"
   },
-  "log_dir": "./logs",
+  "log_dir": "logs",
+  "skills_dir": "skills",
   "tools": {
     "bash": {
       "enabled": true,

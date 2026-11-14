@@ -48,9 +48,9 @@ const (
 // transcript. It is presentation only — never added to history.
 const turnSeparator = "----====----"
 
-// Default locations under the user's home directory. Litegent treats
-// ~/.litegent/ as the place to keep durable agent configuration:
-// system.md for the system prompt and config.json for the configuration.
+// Bootstrap defaults. When -c is omitted, Litegent still bootstraps from
+// ~/.litegent/config.json. Once that config is loaded, top_dir governs
+// system.md, skills, sessions, logs, and spool storage.
 const (
 	defaultDirName              = ".litegent"
 	defaultSystemPromptFileName = "system.md"
@@ -74,7 +74,7 @@ Usage:
   litegent [-s <system_prompt_file>] -i [-c <config_file>] [-k <skills_directory>] [-v]
 
 Flags:
-  -s, --system PATH   Path to the system prompt file (default: ~/.litegent/system.md, created if absent)
+  -s, --system PATH   Path to the system prompt file (default: <top_dir>/system.md, created if absent)
   -p, --prompt PATH   Path to the task prompt file (required unless -i is set)
   -c, --config PATH   Path to the JSON config file (default: ~/.litegent/config.json)
   -k, --skills PATH   Path to a directory of skill Markdown files (optional)
@@ -89,11 +89,10 @@ end the session. Conversation history persists across turns; max_steps
 applies independently to each turn.
 `
 
-// defaultLitegentDir returns the per-user configuration directory,
-// ~/.litegent. It is a location convention only — Litegent remains
-// unconfined and will happily read config or prompts from anywhere when
-// explicit flags point elsewhere.
-func defaultLitegentDir() (string, error) {
+// defaultBootstrapDir returns ~/.litegent, the location used only to
+// bootstrap config.json when -c is omitted. After the config is loaded,
+// top_dir governs every default path.
+func defaultBootstrapDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("determining home directory: %w", err)
@@ -104,21 +103,17 @@ func defaultLitegentDir() (string, error) {
 // defaultConfigPath returns ~/.litegent/config.json, the config used when
 // -c/--config is omitted.
 func defaultConfigPath() (string, error) {
-	dir, err := defaultLitegentDir()
+	dir, err := defaultBootstrapDir()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(dir, defaultConfigFileName), nil
 }
 
-// defaultSystemPromptPath returns ~/.litegent/system.md, the system
-// prompt used when -s/--system is omitted.
-func defaultSystemPromptPath() (string, error) {
-	dir, err := defaultLitegentDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, defaultSystemPromptFileName), nil
+// defaultSystemPromptPath returns <top_dir>/system.md, the system prompt
+// used when -s/--system is omitted.
+func defaultSystemPromptPath(topDir string) string {
+	return filepath.Join(topDir, defaultSystemPromptFileName)
 }
 
 // ensureDefaultSystemPrompt writes content to path when path is absent.
@@ -234,47 +229,10 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return ExitConfigOrCLIError
 	}
 
-	// Resolve the system prompt: an explicit -s always wins. Otherwise
-	// ensure ~/.litegent/system.md exists (creating it with the built-in
-	// prompt on first run), then load it. If the home directory cannot be
-	// determined, use the compiled-in prompt without touching the disk.
-	systemPrompt := defaultSystemPrompt
-	systemPath := args.systemPath
-	if systemPath == "" {
-		if path, pathErr := defaultSystemPromptPath(); pathErr == nil {
-			created, ensureErr := ensureDefaultSystemPrompt(path, defaultSystemPrompt)
-			if ensureErr != nil {
-				fmt.Fprintf(stderr, "litegent: preparing default system prompt: %v\n", ensureErr)
-				return ExitConfigOrCLIError
-			}
-			if created {
-				fmt.Fprintf(stderr, "litegent: created default system prompt at %s\n", path)
-			}
-			systemPath = path
-		}
-	}
-	if systemPath != "" {
-		systemBytes, readErr := os.ReadFile(systemPath)
-		if readErr != nil {
-			fmt.Fprintf(stderr, "litegent: reading system prompt: %v\n", readErr)
-			return ExitConfigOrCLIError
-		}
-		systemPrompt = string(systemBytes)
-	}
-
-	var promptBytes []byte
-	if !args.interactive {
-		promptBytes, err = os.ReadFile(args.promptPath)
-		if err != nil {
-			fmt.Fprintf(stderr, "litegent: reading task prompt: %v\n", err)
-			return ExitConfigOrCLIError
-		}
-	}
-
-	// Resolve the config path: -c wins; otherwise use
-	// ~/.litegent/config.json, creating it with the documented example
-	// values on first use. The created file uses an ${OPENAI_API_KEY}
-	// placeholder, never a real key.
+	// Resolve the config path first: top_dir lives inside the config, so
+	// system.md and all other defaults cannot be resolved until it loads.
+	// When -c is omitted we retain the historical bootstrap behavior:
+	// ~/.litegent/config.json is created with documented defaults.
 	configPath := args.configPath
 	if configPath == "" {
 		path, pathErr := defaultConfigPath()
@@ -298,18 +256,79 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return ExitConfigOrCLIError
 	}
 
-	if args.skillsPath != "" {
-		if _, statErr := os.Stat(args.skillsPath); statErr != nil {
-			fmt.Fprintf(stderr, "litegent: skills directory: %v\n", statErr)
+	// Resolve the system prompt: an explicit -s always wins. Otherwise
+	// ensure <top_dir>/system.md exists, creating it with the built-in
+	// prompt on first use, then load it.
+	systemPrompt := defaultSystemPrompt
+	systemPath := args.systemPath
+	if systemPath == "" {
+		systemPath = defaultSystemPromptPath(cfg.TopDir)
+		created, ensureErr := ensureDefaultSystemPrompt(systemPath, defaultSystemPrompt)
+		if ensureErr != nil {
+			fmt.Fprintf(stderr, "litegent: preparing default system prompt: %v\n", ensureErr)
 			return ExitConfigOrCLIError
 		}
-		skillsXML, err := skills.BuildSkillsPrompt(args.skillsPath)
+		if created {
+			fmt.Fprintf(stderr, "litegent: created default system prompt at %s\n", systemPath)
+		}
+	}
+	if systemPath != "" {
+		systemBytes, readErr := os.ReadFile(systemPath)
+		if readErr != nil {
+			fmt.Fprintf(stderr, "litegent: reading system prompt: %v\n", readErr)
+			return ExitConfigOrCLIError
+		}
+		systemPrompt = string(systemBytes)
+	}
+
+	var promptBytes []byte
+	if !args.interactive {
+		promptBytes, err = os.ReadFile(args.promptPath)
 		if err != nil {
-			fmt.Fprintf(stderr, "litegent: loading skills: %v\n", err)
+			fmt.Fprintf(stderr, "litegent: reading task prompt: %v\n", err)
 			return ExitConfigOrCLIError
 		}
-		if skillsXML != "" {
-			systemPrompt = systemPrompt + "\n\n" + skillsXML
+	}
+
+	// Resolve skills: an explicit -k always wins. Otherwise use
+	// <top_dir>/skills when configured, treating a missing default
+	// directory as "no skills" rather than an error.
+	skillsPath := args.skillsPath
+	explicitSkills := skillsPath != ""
+	if skillsPath == "" {
+		skillsPath = cfg.SkillsDir
+	}
+	if skillsPath != "" {
+		if _, statErr := os.Stat(skillsPath); statErr != nil {
+			if explicitSkills || !errors.Is(statErr, fs.ErrNotExist) {
+				fmt.Fprintf(stderr, "litegent: skills directory: %v\n", statErr)
+				return ExitConfigOrCLIError
+			}
+		} else {
+			skillsXML, skillsErr := skills.BuildSkillsPrompt(skillsPath)
+			if skillsErr != nil {
+				fmt.Fprintf(stderr, "litegent: loading skills: %v\n", skillsErr)
+				return ExitConfigOrCLIError
+			}
+			if skillsXML != "" {
+				systemPrompt = systemPrompt + "\n\n" + skillsXML
+			}
+		}
+	}
+
+	// Until sessions land (Milestone 2), resolve runtime paths under
+	// top_dir so the application remains coherent. Milestone 2 replaces
+	// this base with the per-session directory.
+	cfg.LogDir, err = config.ResolveUnder(cfg.TopDir, cfg.LogDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "litegent: resolving log_dir: %v\n", err)
+		return ExitConfigOrCLIError
+	}
+	if cfg.ContextConfig.SpoolDir != "" {
+		cfg.ContextConfig.SpoolDir, err = config.ResolveUnder(cfg.TopDir, cfg.ContextConfig.SpoolDir)
+		if err != nil {
+			fmt.Fprintf(stderr, "litegent: resolving spool_dir: %v\n", err)
+			return ExitConfigOrCLIError
 		}
 	}
 

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 )
 
 // ToolBashConfig controls the bash tool.
@@ -51,14 +52,16 @@ type ToolsConfig struct {
 
 // ContextConfig controls the context management engine.
 type ContextConfig struct {
-	MaxContextTokens   int    `json:"max_context_tokens"`
-	MaxToolOutputChars int    `json:"max_tool_output_chars"`
-	WindowSize         int    `json:"window_size"`
-	SpoolDir           string `json:"spool_dir"`
+	MaxContextTokens    int    `json:"max_context_tokens"`
+	TruncateToolOutputs bool   `json:"truncate_tool_outputs"`
+	MaxToolOutputChars  int    `json:"max_tool_output_chars"`
+	WindowSize          int    `json:"window_size"`
+	SpoolDir            string `json:"spool_dir"`
 }
 
 // LitegentConfig is the full configuration schema accepted via -c/--config.
 type LitegentConfig struct {
+	TopDir               string        `json:"top_dir"`
 	BaseURL              string        `json:"base_url"`
 	APIKey               string        `json:"api_key"`
 	Model                string        `json:"model"`
@@ -72,6 +75,7 @@ type LitegentConfig struct {
 	ManageContext        bool          `json:"manage_context"`
 	ContextConfig        ContextConfig `json:"context_config"`
 	LogDir               string        `json:"log_dir"`
+	SkillsDir            string        `json:"skills_dir"`
 	Tools                ToolsConfig   `json:"tools"`
 }
 
@@ -80,6 +84,9 @@ type LitegentConfig struct {
 // omitted keys retain sane defaults instead of zero-valuing to false/0/"".
 func Default() LitegentConfig {
 	return LitegentConfig{
+		// TopDir is a bootstrap default. Load replaces it with the
+		// directory containing the config file when top_dir is omitted.
+		TopDir:               "~/.litegent",
 		BaseURL:              "https://api.openai.com/v1",
 		APIKey:               os.Getenv("OPENAI_API_KEY"),
 		Model:                "gpt-4o",
@@ -92,12 +99,14 @@ func Default() LitegentConfig {
 		MaxRepeatedToolCalls: 3,
 		ManageContext:        true,
 		ContextConfig: ContextConfig{
-			MaxContextTokens:   16000,
-			MaxToolOutputChars: 4000,
-			WindowSize:         20,
-			SpoolDir:           ".tmp/tool_outputs",
+			MaxContextTokens:    32000,
+			TruncateToolOutputs: true,
+			MaxToolOutputChars:  4000,
+			WindowSize:          40,
+			SpoolDir:            "spool",
 		},
-		LogDir: "./logs",
+		LogDir:    "logs",
+		SkillsDir: "skills",
 		Tools: ToolsConfig{
 			Bash:    ToolBashConfig{Enabled: true, Timeout: 60.0, DefaultWorkdir: "."},
 			FileOps: ToolFileOpsConfig{Enabled: true, MaxReadLines: 2000},
@@ -183,20 +192,45 @@ func interpolateEnv(raw string) string {
 }
 
 // Load reads the JSON config file at path, interpolates environment
-// variable references, and validates the result.
+// variable references, resolves top_dir, and validates the result.
+//
+// top_dir defaults to the directory containing the config file. For the
+// default bootstrap config at ~/.litegent/config.json this preserves the
+// historical behavior of keeping config.json and system.md together.
 func Load(path string) (LitegentConfig, error) {
-	raw, err := os.ReadFile(path)
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return LitegentConfig{}, fmt.Errorf("resolving config path %q: %w", path, err)
+	}
+	raw, err := os.ReadFile(absPath)
 	if err != nil {
 		return LitegentConfig{}, fmt.Errorf("reading config %q: %w", path, err)
 	}
+	data := []byte(interpolateEnv(string(raw)))
 
 	// Start from the documented defaults, then unmarshal the user's JSON
 	// on top so omitted keys keep their defaults instead of zeroing out.
 	cfg := Default()
-	if err := json.Unmarshal([]byte(interpolateEnv(string(raw))), &cfg); err != nil {
+	if err := json.Unmarshal(data, &cfg); err != nil {
 		return LitegentConfig{}, fmt.Errorf("parsing config %q: %w", path, err)
 	}
 
+	// Distinguish an omitted top_dir from an explicitly supplied value.
+	// Omitted means "use the config file's directory"; explicit (including
+	// an empty string) is validated below.
+	var presence struct {
+		TopDir *string `json:"top_dir"`
+	}
+	if err := json.Unmarshal(data, &presence); err != nil {
+		return LitegentConfig{}, fmt.Errorf("parsing config %q: %w", path, err)
+	}
+	if presence.TopDir == nil {
+		cfg.TopDir = filepath.Dir(absPath)
+	}
+
+	if err := cfg.resolvePaths(); err != nil {
+		return LitegentConfig{}, fmt.Errorf("invalid config %q: %w", path, err)
+	}
 	if err := cfg.Validate(); err != nil {
 		return LitegentConfig{}, fmt.Errorf("invalid config %q: %w", path, err)
 	}
@@ -204,10 +238,40 @@ func Load(path string) (LitegentConfig, error) {
 	return cfg, nil
 }
 
-// Validate checks that required fields are present and sane. It never
-// attempts to validate that paths live under any particular directory —
-// Litegent is intentionally unconfined (req/requirements_doc.md NFR-3.4).
+// resolvePaths expands top_dir and resolves skills_dir against it.
+// log_dir and spool_dir intentionally remain session-relative; they are
+// joined to the session directory at runtime.
+func (c *LitegentConfig) resolvePaths() error {
+	topDir, err := ExpandPath(c.TopDir)
+	if err != nil {
+		return fmt.Errorf("resolving top_dir: %w", err)
+	}
+	c.TopDir = topDir
+
+	if c.SkillsDir == "" {
+		return nil
+	}
+	if filepath.IsAbs(c.SkillsDir) || c.SkillsDir == "~" || strings.HasPrefix(c.SkillsDir, "~/") {
+		c.SkillsDir, err = ExpandPath(c.SkillsDir)
+	} else {
+		c.SkillsDir, err = ResolveUnder(c.TopDir, c.SkillsDir)
+	}
+	if err != nil {
+		return fmt.Errorf("resolving skills_dir: %w", err)
+	}
+	return nil
+}
+
+// Validate checks that required fields are present and sane. Path-related
+// checks are limited to the values that must remain inside the session
+// directory; Litegent itself is intentionally unconfined.
 func (c LitegentConfig) Validate() error {
+	if c.TopDir == "" {
+		return fmt.Errorf("top_dir must not be empty")
+	}
+	if !filepath.IsAbs(c.TopDir) {
+		return fmt.Errorf("top_dir must be absolute after resolution, got %q", c.TopDir)
+	}
 	if c.BaseURL == "" {
 		return fmt.Errorf("base_url must not be empty")
 	}
@@ -220,15 +284,30 @@ func (c LitegentConfig) Validate() error {
 	if c.MaxRepeatedToolCalls < 0 {
 		return fmt.Errorf("max_repeated_tool_calls must not be negative, got %d", c.MaxRepeatedToolCalls)
 	}
+	if err := ValidateRelativePath("log_dir", c.LogDir); err != nil {
+		return err
+	}
+	if c.SkillsDir != "" && !filepath.IsAbs(c.SkillsDir) {
+		return fmt.Errorf("skills_dir must be absolute after resolution, got %q", c.SkillsDir)
+	}
 	if c.ManageContext {
 		if c.ContextConfig.MaxContextTokens <= 0 {
 			return fmt.Errorf("context_config.max_context_tokens must be positive, got %d", c.ContextConfig.MaxContextTokens)
 		}
-		if c.ContextConfig.MaxToolOutputChars <= 0 {
-			return fmt.Errorf("context_config.max_tool_output_chars must be positive, got %d", c.ContextConfig.MaxToolOutputChars)
-		}
 		if c.ContextConfig.WindowSize <= 0 {
 			return fmt.Errorf("context_config.window_size must be positive, got %d", c.ContextConfig.WindowSize)
+		}
+		if c.ContextConfig.TruncateToolOutputs {
+			if c.ContextConfig.MaxToolOutputChars <= 0 {
+				return fmt.Errorf("context_config.max_tool_output_chars must be positive, got %d", c.ContextConfig.MaxToolOutputChars)
+			}
+			if err := ValidateRelativePath("context_config.spool_dir", c.ContextConfig.SpoolDir); err != nil {
+				return err
+			}
+		} else if c.ContextConfig.SpoolDir != "" {
+			if err := ValidateRelativePath("context_config.spool_dir", c.ContextConfig.SpoolDir); err != nil {
+				return err
+			}
 		}
 	}
 	if c.ThinkingActive() {

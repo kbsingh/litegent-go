@@ -35,8 +35,27 @@ func TestLoad_AppliesDefaults(t *testing.T) {
 	if cfg.MaxRepeatedToolCalls != 3 {
 		t.Errorf("MaxRepeatedToolCalls default not applied, got %d", cfg.MaxRepeatedToolCalls)
 	}
-	if cfg.ContextConfig.SpoolDir != ".tmp/tool_outputs" {
+	if cfg.ContextConfig.SpoolDir != "spool" {
 		t.Errorf("SpoolDir default not applied, got %q", cfg.ContextConfig.SpoolDir)
+	}
+	if cfg.ContextConfig.MaxContextTokens != 32000 {
+		t.Errorf("MaxContextTokens default = %d, want 32000", cfg.ContextConfig.MaxContextTokens)
+	}
+	if cfg.ContextConfig.WindowSize != 40 {
+		t.Errorf("WindowSize default = %d, want 40", cfg.ContextConfig.WindowSize)
+	}
+	if !cfg.ContextConfig.TruncateToolOutputs {
+		t.Error("TruncateToolOutputs default must be true")
+	}
+	wantTop := filepath.Dir(path)
+	if cfg.TopDir != wantTop {
+		t.Errorf("TopDir = %q, want the config file's directory %q", cfg.TopDir, wantTop)
+	}
+	if want := filepath.Join(wantTop, "skills"); cfg.SkillsDir != want {
+		t.Errorf("SkillsDir = %q, want %q", cfg.SkillsDir, want)
+	}
+	if cfg.LogDir != "logs" {
+		t.Errorf("LogDir default = %q, want logs", cfg.LogDir)
 	}
 }
 
@@ -283,5 +302,85 @@ func TestLoad_ExampleConfig(t *testing.T) {
 	}
 	if cfg.MaxRepeatedToolCalls != 3 {
 		t.Errorf("MaxRepeatedToolCalls = %d, want 3", cfg.MaxRepeatedToolCalls)
+	}
+}
+
+func TestLoad_TopDirExplicit(t *testing.T) {
+	dir := t.TempDir()
+	top := filepath.Join(dir, "custom-top")
+	path := filepath.Join(dir, "config.json")
+	content := `{"top_dir": "` + top + `", "skills_dir": "my-skills"}`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.TopDir != top {
+		t.Errorf("TopDir = %q, want %q", cfg.TopDir, top)
+	}
+	if want := filepath.Join(top, "my-skills"); cfg.SkillsDir != want {
+		t.Errorf("SkillsDir = %q, want %q", cfg.SkillsDir, want)
+	}
+}
+
+func TestLoad_TopDirTildeExpansion(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := writeTemp(t, "config.json", `{"top_dir": "~/custom-litegent"}`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if want := filepath.Join(home, "custom-litegent"); cfg.TopDir != want {
+		t.Errorf("TopDir = %q, want %q", cfg.TopDir, want)
+	}
+}
+
+func TestLoad_RejectsAbsoluteLogDir(t *testing.T) {
+	path := writeTemp(t, "config.json", `{"log_dir": "/var/log/litegent"}`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected an error for an absolute log_dir, got nil")
+	}
+}
+
+func TestLoad_RejectsEscapingSpoolDir(t *testing.T) {
+	path := writeTemp(t, "config.json", `{"context_config": {"spool_dir": "../outside"}}`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected an error for an escaping spool_dir, got nil")
+	}
+}
+
+func TestLoad_TruncationDisabledAllowsZeroChars(t *testing.T) {
+	path := writeTemp(t, "config.json", `{"context_config": {"truncate_tool_outputs": false, "max_tool_output_chars": 0}}`)
+	if _, err := Load(path); err != nil {
+		t.Fatalf("zero max_tool_output_chars must be allowed when truncation is disabled: %v", err)
+	}
+}
+
+func TestLoad_TruncationEnabledRejectsZeroChars(t *testing.T) {
+	path := writeTemp(t, "config.json", `{"context_config": {"max_tool_output_chars": 0}}`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected an error for zero max_tool_output_chars when truncation is enabled, got nil")
+	}
+}
+
+func TestDefaultJSON_ContainsNewDefaults(t *testing.T) {
+	data, err := DefaultJSON()
+	if err != nil {
+		t.Fatalf("DefaultJSON returned error: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		`"top_dir": "~/.litegent"`,
+		`"skills_dir": "skills"`,
+		`"truncate_tool_outputs": true`,
+		`"max_context_tokens": 32000`,
+		`"window_size": 40`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("generated config missing %s:\n%s", want, text)
+		}
 	}
 }

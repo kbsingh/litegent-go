@@ -265,7 +265,7 @@ func (a *Agent) dispatchToolCall(ctx context.Context, step int, call llm.ToolCal
 		)
 	}
 
-	if a.Config.ManageContext {
+	if a.Config.ManageContext && a.Config.ContextConfig.TruncateToolOutputs {
 		truncated, info, terr := a.Context.TruncateToolOutput(call.ID, output)
 		if terr == nil {
 			output = truncated
