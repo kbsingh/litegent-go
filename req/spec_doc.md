@@ -2,7 +2,7 @@
 
 **Project Name**: Litegent
 **Target Platform**: Linux (Ubuntu 22.04+, Debian 12+, RHEL 9+, Fedora 39+, Arch)
-**Language & Runtime**: Go 1.22+ (standard library `net/http`, `encoding/json`, `context`, `os/exec`, `flag`; `github.com/bmatcuk/doublestar/v4` for recursive `**` glob matching). The shipped `go.mod` pins `go 1.26.8` as the toolchain directive (the version `go mod init` stamped), but any Go 1.22+ toolchain builds and passes the full test suite.
+**Language & Runtime**: Go 1.26.8+ (standard library `net/http`, `encoding/json`, `context`, `os/exec`, `flag`; `github.com/bmatcuk/doublestar/v4` for recursive `**` glob matching). The shipped `go.mod` declares `go 1.26.8`, and the test suite uses APIs that require a modern toolchain.
 **Document Version**: 2.0.0
 **Status**: Current — reflects the shipped implementation on `main`/`thinner`
 
@@ -66,9 +66,9 @@
 |            (internal/tools)              |                 |         (internal/logging)           |
 |                                          |                 |                                      |
 | - bash.go: Host Linux shell runner       |                 | 1. Append-only JSONL Event Traces    |
-| - fileops.go: read, write, edit          |                 |    (logs/trace_<timestamp>.jsonl)    |
+| - fileops.go: read, write, edit          |                 |    (logs/trace_<run-id>.jsonl)    |
 | - search.go: glob_search, grep_search    |                 | 2. Formatted Human Narrative Log     |
-| - registry.go: Tool interface + Registry |                 |    (logs/session_<timestamp>.log)   |
+| - registry.go: Tool interface + Registry |                 |    (logs/session_<run-id>.log)   |
 +------------------------------------------+                 +--------------------------------------+
 ```
 
@@ -84,28 +84,36 @@ Go idiom: `cmd/litegent/main.go` is a single statement — `os.Exit(cliapp.Run(o
 
 #### Interface & Flags
 ```
-litegent [-h] [--version] [-s SYSTEM] -p PROMPT [-c CONFIG] [-k SKILLS] [-v]
-litegent [-h] [--version] [-s SYSTEM] -i [-c CONFIG] [-k SKILLS] [-v]
+litegent [-h] [--version] [-s SYSTEM] -p PROMPT [-c CONFIG] [-k SKILLS] [-v] [-r SESSION_ID | --resume-last]
+litegent [-h] [--version] [-s SYSTEM] -i [-c CONFIG] [-k SKILLS] [-v] [-r SESSION_ID | --resume-last]
 ```
-- `-s, --system PATH`: Path to system prompt text file. (Optional; defaults to `~/.litegent/system.md`, which is created with the built-in default system prompt when absent — quoted in `req/user_guide.md` Section 5.1.)
+- `-s, --system PATH`: Path to system prompt text file. (Optional; defaults to `<top_dir>/system.md`. For a new session it is created with the built-in default prompt when absent — quoted in `req/user_guide.md` Section 5.1. A resumed session never creates it.)
 - `-p, --prompt PATH`: Path to task prompt text file. (Mandatory unless `-i` is set; conflicts with `-i`)
-- `-c, --config PATH`: Path to JSON config file. (Optional; defaults to `~/.litegent/config.json`)
-- `-k, --skills PATH`: Path to directory of skill Markdown files. (Optional)
+- `-c, --config PATH`: Path to JSON config file. (Optional; bootstraps from `~/.litegent/config.json` when omitted)
+- `-k, --skills PATH`: Path to directory of skill Markdown files. (Optional; overrides `skills_dir`, default `<top_dir>/skills`)
 - `-i, --interactive`: Run a persistent, multi-turn session reading task prompts from stdin instead of `-p`. (Optional; see 2.1.1)
+- `-r, --resume SESSION_ID`: Resume an existing session. Conflicts with `--resume-last`.
+- `--resume-last`: Resume the most recently used valid session. Conflicts with `-r`.
 - `-v, --verbose`: Stream live progress to stderr as the loop runs (see 2.1.2). The dual audit log (2.7) is always written regardless of `-v`.
 - `-h, --help`: Print usage and exit 0.
 - `--version`: Print `litegent version <version>` and exit 0.
 
 Flags are parsed with the standard library `flag` package, not a third-party CLI library: `internal/cliapp.parseArgs` registers each short/long pair (`-s`/`--system`, `-p`/`--prompt`, `-c`/`--config`, `-k`/`--skills`, `-v`/`--verbose`, `-i`/`--interactive`, `-h`/`--help`) twice against the same backing struct field via `flag.FlagSet.StringVar`/`BoolVar`, because stdlib `flag` already treats `-x` and `--x` identically — no external CLI-parsing dependency is needed. `--version` is registered once (it has no short form). The flag set uses `flag.ContinueOnError` with output discarded (`fs.SetOutput(io.Discard)`); `Run` prints its own usage text on a parse error.
 
-Validation order in `Run`: (1) parse flags, (2) handle `-h`/`--version` early-exit, (3) reject `-i` + `-p` together, (4) check required flags (`-p` only if `!interactive`) and report any missing flag, (5) resolve the system prompt (`-s`, else `~/.litegent/system.md`, creating that default file with the built-in prompt when absent) and read it, (6) read the task prompt file (skipped if `-i`), (7) resolve the config path (`-c`, else `~/.litegent/config.json`, creating that default file when absent) and load/validate it, (8) stat + load the skills directory if `-k` was given, (9) construct the logger, tool registry, LLM client, context manager, progress reporter, and `agent.Agent`, (10) run the agentic loop (single-shot or interactive) under a `signal.NotifyContext`-derived cancellable context.
+Validation order in `Run`: (1) parse flags, (2) handle `-h`/`--version` early-exit, (3) reject `-i` + `-p` together and `-r` + `--resume-last` together, (4) check required flags (`-p` only if `!interactive`) and report any missing flag, (5) resolve the config path (`-c`, else `~/.litegent/config.json`, creating that default file when absent) and load/validate it, (6) resolve the system prompt (`-s`, else `<top_dir>/system.md`; create it on a new session, never on resume) and read it, (7) read the task prompt file (skipped if `-i`), (8) load skills from `-k` or `skills_dir`, (9) create or resume the session, load its context on resume, and resolve log/spool paths, (10) construct the logger, tool registry, LLM client, context manager, progress reporter, and `agent.Agent`, (11) run the agentic loop (single-shot or interactive) under a cancellable context with graceful signal handling, and (12) finalize the run record, logs, and context on every exit path.
 
-#### Default Configuration Directory
-`~/.litegent/` is the conventional home for durable per-user configuration:
-- `system.md`: default system prompt. When `-s` is omitted and the file is absent, it is created with the built-in default prompt; an existing file is never overwritten.
-- `config.json`: default configuration, used when `-c` is omitted.
+#### Bootstrap Configuration and `top_dir`
+`~/.litegent/` remains the bootstrap home when `-c` is omitted:
+- `config.json`: bootstrap configuration, created with documented defaults when absent.
+- `system.md`: default system prompt for new sessions. When `-s` is omitted and the file is absent, it is created with the built-in default prompt; an existing file is never overwritten.
 
-An explicit flag always wins. If `-c` is omitted and `~/.litegent/config.json` does not exist, `Run` creates the directory and file with the documented example values, prints a one-line notice to stderr, and continues. The generated file uses `${OPENAI_API_KEY}` as its API-key placeholder, never a real credential, and an existing file is never overwritten. The directory is a convention, not an access boundary: Litegent remains unconfined and accepts flag-supplied paths anywhere on the host.
+Once the config is loaded, `top_dir` governs system prompt, skills, sessions, logs, and spool:
+- `top_dir` defaults to the directory containing the loaded config file. For the bootstrap config that is `~/.litegent`.
+- If `-c /custom/config.json` is supplied and omits `top_dir`, the effective top directory is `/custom`.
+- If `-c` is omitted and `~/.litegent/config.json` does not exist, `Run` creates the directory and file with the documented example values, prints a one-line notice to stderr, and continues.
+- The generated file uses `${OPENAI_API_KEY}` as its API-key placeholder, never a real credential, and an existing file is never overwritten.
+
+`log_dir` and `spool_dir` are session-relative and are resolved after the session is created or resumed. `skills_dir` is resolved against `top_dir`. Litegent remains unconfined for tools; these path rules are storage organization, not an access boundary.
 
 ##### 2.1.1 Interactive Mode (`-i`)
 
@@ -115,8 +123,8 @@ An explicit flag always wins. If `-c` is omitted and `~/.litegent/config.json` d
 - A blank line (after trimming whitespace) re-prompts without starting a turn or contacting the LLM.
 - A line that trims to `/exit` or `/quit` (case-insensitive) ends the session cleanly.
 - Any other non-blank line becomes that turn's prompt, passed to `agent.Agent.RunInteractive` (2.8).
-- After each turn, the turn's `Result` is handled by an `onTurnResult` callback: `OutcomeSuccess` prints `FinalMessage` to stdout, followed by the `----====----` turn separator, and continues; `OutcomeMaxStepsExceeded` reports to stderr and continues (the session is not terminated — history remains valid for the next turn); `OutcomeInterrupted` and `OutcomeLLMError` both print to stderr and end the session (return `false` from the callback).
-- The CLI-level exit code is `ExitInterrupted` for `OutcomeInterrupted`, `ExitLLMAPIError` for `OutcomeLLMError`, and `ExitSuccess` for everything else (including a session that ended after one or more turns hit `OutcomeMaxStepsExceeded`, since the session itself still ended cleanly via `/exit`/EOF).
+- After each turn, the turn's `Result` is handled by an `onTurnResult` callback: `OutcomeSuccess` prints `FinalMessage` to stdout, followed by the `----====----` turn separator, and continues; `OutcomeMaxStepsExceeded` reports to stderr and continues; `OutcomeInterrupted`, `OutcomeStorageError`, and `OutcomeLLMError` print to stderr and end the session (return `false` from the callback).
+- The CLI-level exit code is `ExitInterrupted` for `OutcomeInterrupted`, `ExitLLMAPIError` for `OutcomeLLMError`, `ExitConfigOrCLIError` for `OutcomeStorageError`, and `ExitSuccess` for everything else (including a session that ended after one or more turns hit `OutcomeMaxStepsExceeded`, since the session itself still ended cleanly via `/exit`/EOF).
 
 ##### 2.1.2 Progress Reporting (`-v`, `internal/progress`)
 
@@ -179,13 +187,15 @@ type ToolsConfig struct {
 }
 
 type ContextConfig struct {
-    MaxContextTokens   int    `json:"max_context_tokens"`
-    MaxToolOutputChars int    `json:"max_tool_output_chars"`
-    WindowSize         int    `json:"window_size"`
-    SpoolDir           string `json:"spool_dir"`
+    MaxContextTokens    int    `json:"max_context_tokens"`
+    TruncateToolOutputs bool   `json:"truncate_tool_outputs"`
+    MaxToolOutputChars  int    `json:"max_tool_output_chars"`
+    WindowSize          int    `json:"window_size"`
+    SpoolDir            string `json:"spool_dir"`
 }
 
 type LitegentConfig struct {
+    TopDir               string        `json:"top_dir"`
     BaseURL              string        `json:"base_url"`
     APIKey               string        `json:"api_key"`
     Model                string        `json:"model"`
@@ -199,6 +209,7 @@ type LitegentConfig struct {
     ManageContext        bool          `json:"manage_context"`
     ContextConfig        ContextConfig `json:"context_config"`
     LogDir               string        `json:"log_dir"`
+    SkillsDir            string        `json:"skills_dir"`
     Tools                ToolsConfig   `json:"tools"`
 }
 
@@ -207,6 +218,7 @@ type LitegentConfig struct {
 // omitted keys retain sane defaults instead of zero-valuing to false/0/"".
 func Default() LitegentConfig {
     return LitegentConfig{
+        TopDir:               "~/.litegent",
         BaseURL:              "https://api.openai.com/v1",
         APIKey:               os.Getenv("OPENAI_API_KEY"),
         Model:                "gpt-4o",
@@ -219,12 +231,14 @@ func Default() LitegentConfig {
         MaxRepeatedToolCalls: 3,
         ManageContext:        true,
         ContextConfig: ContextConfig{
-            MaxContextTokens:   16000,
-            MaxToolOutputChars: 4000,
-            WindowSize:         20,
-            SpoolDir:           ".tmp/tool_outputs",
+            MaxContextTokens:    32000,
+            TruncateToolOutputs: true,
+            MaxToolOutputChars:  4000,
+            WindowSize:          40,
+            SpoolDir:            "spool",
         },
-        LogDir: "./logs",
+        LogDir:    "logs",
+        SkillsDir: "skills",
         Tools: ToolsConfig{
             Bash:    ToolBashConfig{Enabled: true, Timeout: 60.0, DefaultWorkdir: "."},
             FileOps: ToolFileOpsConfig{Enabled: true, MaxReadLines: 2000},
@@ -234,12 +248,12 @@ func Default() LitegentConfig {
 }
 ```
 
-`Validate() error` rejects an empty `BaseURL` or `Model`, a non-positive `MaxSteps`, a negative `MaxRepeatedToolCalls`, and — only when `ManageContext` is true — a non-positive `MaxContextTokens` or `MaxToolOutputChars` or `WindowSize`. It also rejects, but only when thinking is active, a `ThinkingFormat` other than `"reasoning_effort"` or `"thinking"` (an empty format means the `"reasoning_effort"` default). The level itself is never validated: `ThinkingLevel` is free text passed through verbatim, and `(LitegentConfig) ThinkingActive() bool` reports whether it carries an explicit non-`"default"` value that must be sent. A `(LitegentConfig) MaskedAPIKey() string` helper renders `<first 3 chars>...<last 4 chars>`, preserving the key's own stub prefix (e.g. `sk-...wxyz`, `r9_...wxyz`); keys of 7 characters or fewer are masked entirely (`****`), since a 3+4 character reveal would expose the whole key. Callers use it anywhere a key must be shown without leaking it.
+`Load` resolves `top_dir` (`~` expansion, absolute; config-directory default when omitted) and `skills_dir` (absolute or relative to `top_dir`). `Validate() error` rejects an empty or non-absolute resolved `TopDir`, an empty `BaseURL` or `Model`, a non-positive `MaxSteps`, a negative `MaxRepeatedToolCalls`, an unsafe relative `LogDir`, and — only when `ManageContext` is true — a non-positive `MaxContextTokens` or `WindowSize`; when `TruncateToolOutputs` is also true, `MaxToolOutputChars` must be positive and `SpoolDir` must be a safe relative path. It also validates `ThinkingFormat` only when thinking is active. `ThinkingLevel` remains free text passed through verbatim. `MaskedAPIKey()` renders `<first 3 chars>...<last 4 chars>`, or `****` for keys of 7 characters or fewer.
 
 #### Default File Generation
 `DefaultJSON() ([]byte, error)` renders the documented defaults as indented JSON with `api_key` set to the literal placeholder `${OPENAI_API_KEY}` — never the caller's environment-resolved secret. `EnsureDefaultConfig(path) (created bool, err error)` creates the parent directory and writes the file with `O_CREATE|O_EXCL` when absent, returning `created=true` only for the process that won the creation race. Existing files are never overwritten.
 
-In `internal/cliapp`, `ensureDefaultSystemPrompt(path, content)` applies the same create-if-absent/O_EXCL discipline to `~/.litegent/system.md`, writing the built-in prompt text. A successful first-run creation is reported with a one-line stderr notice.
+In `internal/cliapp`, `ensureDefaultSystemPrompt(path, content)` applies the same create-if-absent/O_EXCL discipline to `<top_dir>/system.md`, writing the built-in prompt text. A successful first-run creation is reported with a one-line stderr notice. A resumed session never calls this function; its stored system message is authoritative.
 
 #### Environment Variable Interpolation
 Configuration files can include strings matching `${ENV_VAR}` or `${ENV_VAR:-default}`. `Load` performs regex substitution on the raw file bytes, then unmarshals the result:
@@ -539,13 +553,14 @@ Raw Messages
 Stage 1: Tool Output Truncator (TruncateToolOutput — spools to disk if > max_tool_output_chars)
     │
     ▼
-Stage 2: Sliding Window Pruner (Prepare — retains System [0], first user turn [1], and last N turns)
+Stage 2: Sliding Window Pruner (Prepare — retains System [0], first user message [1], and the
+    │     most recent whole units up to window_size messages)
     │
     ▼
 Stage 3: Conversation Summarizer (Prepare — only when Stage 2 evicted something AND the token
-    │     budget is actually exceeded; otherwise evicted turns are just dropped)
+    │     budget is actually exceeded; otherwise evicted messages are just dropped)
     ▼
-Clean Messages Ready for LLM
+PrepareResult -> agent logs pruning/summary and atomically saves context.json
 ```
 
 #### Stage 1: Tool Output Truncation — `(m *Manager) TruncateToolOutput(callID, rawOutput string) (string, *TruncationInfo, error)`
@@ -555,16 +570,22 @@ type TruncationInfo struct {
     OmittedChars int
 }
 ```
-If `m.cfg.MaxToolOutputChars <= 0` or `len(rawOutput)` is already within it, returns `(rawOutput, nil, nil)` unchanged — a `nil` `*TruncationInfo` means "no truncation happened," which `internal/agent` uses to decide whether to log a `context_truncation` trace event. Otherwise: `os.MkdirAll(spoolDir, 0o755)` (defaulting to `.tmp/tool_outputs` if `SpoolDir` is empty — an ordinary default, not an access boundary, per Section 4), writes the full `rawOutput` to `<spoolDir>/output_<callID>.txt`, then splices `headLen = 0.6 * maxChars` head characters + a notice naming the omitted character count and the spool file path + `tailLen = 0.3 * maxChars` tail characters.
+This stage only runs when `manage_context && truncate_tool_outputs`. If `m.cfg.MaxToolOutputChars <= 0` or `len(rawOutput)` is already within it, it returns `(rawOutput, nil, nil)` unchanged — a `nil` `*TruncationInfo` means "no truncation happened," which `internal/agent` uses to decide whether to log a `context_truncation` trace event. Otherwise it writes the full `rawOutput` to `<session-spool-dir>/output_<callID>.txt` (default `spool/` inside the session), then splices a 60% head + truncation notice + 30% tail.
 
-#### Stage 2 & 3 — `(m *Manager) Prepare(ctx context.Context, messages []llm.Message) ([]llm.Message, error)`
+#### Stage 2 & 3 — `(m *Manager) Prepare(ctx context.Context, messages []llm.Message) (PrepareResult, error)`
+```go
+type PrepareResult struct {
+    Messages   []llm.Message
+    Evicted    int
+    Summarized bool
+    Summary    string
+}
+```
 Message layout: `messages[0]` = system prompt (permanent), `messages[1]` = the first user message in the conversation — single-shot mode's `-p` content, or interactive mode's first turn (permanent), an optional `messages[2]` = `<context_summary>` (role `llm.RoleSummary`), and everything after that is active dialogue subject to pruning.
 
-`Prepare` is a no-op if `len(messages) <= 2`. Otherwise: if `len(active) > m.cfg.WindowSize` (where `active` is everything after the anchors and any existing summary), the oldest `len(active) - WindowSize` messages become `evicted`. A summarization call is only made when **both**:
-1. `m.summarizer != nil`, and
-2. `overBudget` — computed as `m.cfg.MaxContextTokens <= 0 || EstimateTokens(messages) > m.cfg.MaxContextTokens` (pre-eviction estimate; `MaxContextTokens <= 0` is treated as "no budget gate configured," so it falls back to always summarizing on overflow — the same convention Stage 1 uses for `MaxToolOutputChars <= 0`).
+`Prepare` is a no-op if `len(messages) <= 2`. Otherwise, when `active` exceeds `window_size` **messages** (default 40), it computes an eviction count over whole units: an assistant message with tool calls is grouped with its following tool results, and every other message is its own unit. At least the most recent unit is always retained, even if it alone exceeds the window, so a tool-call/result pair is never split. A summarization call is only made when **both** `m.summarizer != nil` and the pre-eviction token estimate exceeds `MaxContextTokens` (default 32000). When summarization runs, the newly evicted messages plus any prior summary are condensed and replace the summary at index 2. When eviction occurs under budget, the messages are dropped without a summarization call.
 
-When a summarization call is made, it covers the newly evicted messages plus any prior `<context_summary>` content (so a summary is never silently dropped by a later eviction), and the result replaces `messages[2]` as the new `<context_summary>`. **When the window overflows but the token budget is not exceeded, the evicted turns are simply dropped with no summarization call** — this avoids an LLM round-trip on every window overflow regardless of actual token pressure (this gating was a deliberate fix; an earlier version always summarized on overflow, leaving `MaxContextTokens` effectively unused).
+The agent uses `PrepareResult` to log `context_pruning` and `context_summary`, then atomically saves the resulting message list to `<session-dir>/context.json` before the next LLM request.
 
 `EstimateTokens(messages []llm.Message) int` is a dependency-free heuristic: total character count (message `Content` plus each tool call's `Function.Name`+`Function.Arguments`) divided by 4 — not a real tokenizer, intentionally, to keep the dependency footprint minimal.
 
@@ -590,67 +611,73 @@ When a summarization call is made, it covers the newly evicted messages plus any
 Because Litegent runs unconfined with no sandbox (Section 4), this log is the system's primary safety and accountability control — every LLM and tool interaction is captured here regardless of `-v`.
 
 #### Session Lifecycle
-`logging.New(logDir, apiKey string) (*Logger, error)`:
-- `os.MkdirAll(logDir, 0o755)`.
-- Timestamp tag `ts := time.Now().UTC().Format("20060102_150405")`.
-- Opens `trace_{ts}.jsonl` and `session_{ts}.log` with `O_APPEND|O_CREATE|O_WRONLY`, exposed as `Logger.TracePath`/`Logger.SessionPath`.
-- `apiKey`, if non-empty, is redacted out of every string value written to either file — not just in a dedicated "api_key" field, but anywhere the literal key text would otherwise appear (e.g. inside an error message). The mask preserves the key's own stub prefix (`<first 3 chars>...<last 4 chars>`, e.g. `sk-...1234`, `r9_...1234`); keys of 7 characters or fewer are masked entirely (`****`).
+`logging.NewWithRunID(logDir, apiKey, runID string) (*Logger, error)`:
+- Creates the session log directory with mode `0700`.
+- Opens `trace_<runID>.jsonl` and `session_<runID>.log` with `O_APPEND|O_CREATE|O_WRONLY`, mode `0600`.
+- Exposes `Logger.TracePath`, `Logger.SessionPath`, `Logger.RunID`.
+- `apiKey`, if non-empty, is recursively redacted out of every string value in maps/slices and every human-log block. The mask preserves the key's stub prefix (`sk-...1234`, `r9_...1234`); keys of 7 characters or fewer are fully masked.
+- `Sync()` flushes both files; `Close()` syncs then closes. Every write records the first error in `Logger.Err()`, which callers check to avoid silently losing audit data.
 
-#### JSONL Trace Events (`trace_{ts}.jsonl`)
+#### JSONL Trace Events (`trace_<run-id>.jsonl`)
 ```go
 type TraceEvent struct {
-    Timestamp string         `json:"timestamp"` // ISO 8601 UTC, time.RFC3339Nano
+    Timestamp string         `json:"timestamp"`
     EventType string         `json:"event_type"`
+    Turn      int            `json:"turn"`
     Step      int            `json:"step"`
     Data      map[string]any `json:"data"`
 }
 ```
-One JSON line per event, written under a mutex. The event types actually emitted by the current implementation, each via a dedicated `Logger.Log*` method called from `internal/cliapp`/`internal/agent`:
+Events: `session_start`, `user_prompt`, `llm_request`, `llm_response`, `tool_call`, `tool_result`, `context_truncation`, `context_pruning`, `context_summary`, `loop_guard_triggered`, `turn_finish`, `session_finish`, `run_finish`, `session_error`.
 
-| `event_type` | Emitted by | When |
-|---|---|---|
-| `session_start` | `cliapp.Run` | Once, before the loop starts (single-shot or interactive) |
-| `llm_request` | `agent.runTurn` | Before every `ChatCompletion` call |
-| `llm_response` | `agent.runTurn` | After every `ChatCompletion` call |
-| `tool_call` | `agent.dispatchToolCall` | Before executing each tool call |
-| `tool_result` | `agent.dispatchToolCall` | After executing each tool call |
-| `context_truncation` | `agent.dispatchToolCall` | Only when `ctxmgr.TruncateToolOutput` actually truncated something |
-| `loop_guard_triggered` | `agent.dispatchToolCall` | Only when the repeated-tool-call loop guard fires |
-| `session_finish` | `agent.runTurn` | Once per **turn** that completes with `OutcomeSuccess` — in interactive mode this fires once per turn, not once per process |
-| `session_error` | `agent.runTurn` | Once per turn/run that ends via `OutcomeLLMError`, `OutcomeInterrupted`, or `OutcomeMaxStepsExceeded` |
+Notable payloads:
+- `session_start`: session/run ID, resumed flag, model, base URL, working directory, full system prompt.
+- `user_prompt`: full user input.
+- `llm_request`: message count, token estimate, context SHA-256.
+- `llm_response`: assistant content, tool calls, token usage.
+- `tool_call`: full decoded arguments.
+- `tool_result`: full raw output, success/exit/latency, plus `model_content` and spool metadata when truncation or the loop guard changed what the model saw.
 
-(`internal/logging` also defines `EventContextPruning`/`EventContextSummary` constants and a `LogContextSummary` method, but nothing in the current agent loop calls them — the context manager's sliding-window eviction and summarization, Section 2.5, happen silently from the trace log's perspective today. Their effect is only visible indirectly: fewer/different messages in the next `llm_request`'s implied history, and a `<context_summary>` system message if one was produced.)
+#### Human Transcript (`session_<run-id>.log`)
+Plain text, written under the same mutex as the JSONL file. Stable prefixes and delimiters make the flow parseable:
 
-#### Human Transcript (`session_{ts}.log`)
-Plain text, written under the same mutex as the JSONL file. Header on `LogSessionStart`:
 ```text
 ================================================================================
-Litegent Session: <session_id>
-Started: <ISO8601 UTC>
-Model: <model>
-Base URL: <base_url>
+Litegent Session: brave-otter-runs
+Run: 20261114T101500_123456789Z-4242-1
+Resumed: false
+Started: 2026-11-14T10:15:00Z
+Model: gpt-4o
+Base URL: https://api.openai.com/v1
+Working Dir: /home/user/project
 ================================================================================
+SYSTEM PROMPT
+--------------------------------------------------------------------------------
+<full system prompt + skills>
+--------------------------------------------------------------------------------
+TURN 1 | USER INPUT
+--------------------------------------------------------------------------------
+<full prompt>
+--------------------------------------------------------------------------------
+[T] TURN 1 STEP 0 | LLM REQUEST | messages=2 tokens~=123 context=sha256:...
+[T] TURN 1 STEP 0 | ASSISTANT
+--------------------------------------------------------------------------------
+<assistant content or "(no content)">
+--------------------------------------------------------------------------------
+[T] TURN 1 STEP 0 | TOOL CALL bash | call_id=call_1
+{
+  "command": "go test ./..."
+}
+[T] TURN 1 STEP 0 | TOOL RESULT bash | call_id=call_1 success=true exit_code=0 latency_ms=12.3
+[T] OUTPUT
+--------------------------------------------------------------------------------
+<full raw output>
+--------------------------------------------------------------------------------
+TURN 1 END | outcome=success steps=2 tokens=...
+RUN END | outcome=success exit_code=0 steps=... tokens=...
 ```
-Per-event lines (reusing the trace event's timestamp/step):
-```text
-[2026-10-03T14:32:10.123456789Z] STEP 4 | LLM Request (tokens: ~3420)
-[2026-10-03T14:32:12.456789012Z] STEP 4 | LLM Thought:
-Inspecting test results to locate failing assertions.
-[2026-10-03T14:32:12.456999999Z] STEP 4 | Tool Call:
-bash(command="go test ./internal/auth/... -v")
-[2026-10-03T14:32:13.789012345Z] STEP 4 | Tool Result (exit_code=1):
---- FAIL: TestTokenExpiry (0.00s)
-```
-`bash(command="...")`-style tool-call lines are built by `formatCall`, which sorts the argument keys before formatting so the same call always renders identically across runs (Go map iteration order is otherwise randomized; this has no effect on the JSONL file, since `encoding/json` already sorts map keys when marshaling). A `[LOOP DETECTED] <tool> repeated <n> times with the same result` line is written whenever the loop guard fires. Footer on `LogFinish`:
-```text
-================================================================================
-Final Response:
-<final message text>
-Completed: <ISO8601 UTC>
-Total Steps: <n>
-Total Tokens: <n>
-================================================================================
-```
+
+When truncation occurred, the transcript additionally records a `TRUNCATION | omitted=<n> | spool=<path>` line and a `MODEL INPUT` block containing the exact content sent to the model. Context compaction records `CONTEXT PRUNED | messages=<before>-><after> evicted=<n>` and a `CONTEXT SUMMARY` block.
 
 ---
 
@@ -663,15 +690,20 @@ const (
     OutcomeMaxStepsExceeded
     OutcomeLLMError
     OutcomeInterrupted
+    OutcomeStorageError // context/log persistence failed
 )
-func (o Outcome) String() string // "success" | "max_steps_exceeded" | "llm_error" | "interrupted" | "unknown"
+func (o Outcome) String() string // "success" | "max_steps_exceeded" | "llm_error" | "interrupted" | "storage_error" | "unknown"
 
 type Result struct {
     Outcome      Outcome
     FinalMessage string // only meaningful when Outcome == OutcomeSuccess
-    Steps        int    // single-shot: steps taken; RunInteractive's own return: turns processed
+    Steps        int
     TotalTokens  int
-    Err          error  // populated for OutcomeLLMError and OutcomeInterrupted
+    Err          error  // populated for error outcomes
+}
+
+type ContextStore interface {
+    SaveContext(messages []llm.Message) error
 }
 
 type Agent struct {
@@ -681,6 +713,7 @@ type Agent struct {
     Context  *ctxmgr.Manager
     Logger   *logging.Logger
     Progress *progress.Reporter // nil-safe; defaults to nil (disabled) if never set
+    Store    ContextStore       // nil disables persistence (tests/non-resume callers)
 
     lastSignature *callSignature // repeated-tool-call loop guard state, reset every turn
     repeatCount   int
@@ -689,39 +722,94 @@ type Agent struct {
 func New(cfg config.LitegentConfig, llmClient *llm.Client, registry *tools.Registry, ctxManager *ctxmgr.Manager, logger *logging.Logger) *Agent
 
 func (a *Agent) Run(ctx context.Context, systemPrompt, userPrompt string) Result
+func (a *Agent) RunWithHistory(ctx context.Context, history []llm.Message, userPrompt string, turn int) Result
 func (a *Agent) RunInteractive(
     ctx context.Context,
     systemPrompt string,
     readPrompt func() (prompt string, ok bool),
     onTurnResult func(turn int, result Result) (cont bool),
 ) Result
+func (a *Agent) RunInteractiveWithHistory(ctx context.Context, history []llm.Message, startTurn int, readPrompt func() (prompt string, ok bool), onTurnResult func(turn int, result Result) (cont bool)) Result
 ```
 
-`Run` and `RunInteractive` both delegate to a shared, unexported `runTurn(ctx, messages []llm.Message, turn int) ([]llm.Message, Result)`:
-- `Run` seeds `messages` with `[{RoleSystem, systemPrompt}, {RoleUser, userPrompt}]` and calls `runTurn(ctx, messages, 1)` once, discarding the returned messages and keeping only the `Result`.
-- `RunInteractive` seeds `messages` with just `[{RoleSystem, systemPrompt}]`, then loops: call `readPrompt()` (returning `ok=false` ends the session with `Result{Outcome: OutcomeSuccess, Steps: <turns so far>}`); append the prompt as a `{RoleUser, ...}` message; call `runTurn(ctx, messages, turn)`, keeping the returned (possibly pruned/summarized) messages as the new `messages` for the next turn; call `onTurnResult(turn, result)` — returning `false` ends the session immediately, returning that turn's `Result` as the overall one.
+`Run` and `RunInteractive` are wrappers over the history-aware variants:
+- `Run` seeds `[system]` and calls `RunWithHistory`, which appends the user prompt, logs it, saves context, and calls `runTurn`.
+- `RunInteractive` seeds `[system]` and calls `RunInteractiveWithHistory`, which starts at `startTurn`, appends each prompt, logs/saves it, and calls `runTurn`.
+- A resumed session passes its loaded context and manifest turn count into the history-aware variants.
 
 `runTurn` itself, for each `turn`:
 1. Resets `a.lastSignature = nil; a.repeatCount = 0` — a stuck pattern from a previous turn must never suppress (or spuriously flag) a call in a new one.
 2. Reports `Progress.TurnStart(turn, MaxSteps, len(messages))`.
 3. Loops `step` from 0 while `step < Config.MaxSteps`:
    - Returns `OutcomeInterrupted` immediately if `ctx.Err() != nil`.
-   - If `Config.ManageContext`, calls `Context.Prepare` and reports `Progress.ContextPruned(step, before, after)`.
-   - Logs + reports the LLM request, calls `LLM.ChatCompletion`; a transport/API error or an empty `Choices` slice both yield `OutcomeLLMError`.
+   - Checks `Logger.Err()`; a failed audit write yields `OutcomeStorageError`.
+   - If `Config.ManageContext`, calls `Context.Prepare`, logs `context_pruning`/`context_summary` from the returned `PrepareResult`, reports `Progress.ContextPruned`, and saves the compacted context before the request when eviction or summarization occurred.
+   - Logs + reports the LLM request with the context SHA-256, calls `LLM.ChatCompletion`; a transport/API error or an empty `Choices` slice both yield `OutcomeLLMError`.
    - Logs + reports the LLM response.
-   - If the response has no tool calls: **appends the assistant's final message to `messages`** (so a later turn in an interactive session still sees it — single-shot `Run` doesn't need this since the process exits right after, but it costs nothing extra), logs/reports the finish, and returns `OutcomeSuccess` with that content as `FinalMessage`.
-   - Otherwise appends the assistant's tool-calling message, then calls `dispatchToolCall` for each requested call in order (sequentially, not concurrently — see Section 4 item 6 for why), appending each resulting tool message.
-4. If the loop exhausts `MaxSteps` without a final response: logs a `session_error`, reports `Progress.TurnEnd(turn, "max_steps_exceeded", step)`, and returns `OutcomeMaxStepsExceeded`.
+   - If the response has no tool calls: **appends the assistant's final message to `messages`**, saves context, logs/reports the finish, and returns `OutcomeSuccess`.
+   - Otherwise appends the assistant's tool-calling message, then calls `dispatchToolCall` for each requested call in order, appending each resulting tool message. After all results for the step are appended, context is saved. A storage failure yields `OutcomeStorageError`.
+4. If the loop exhausts `MaxSteps` without a final response: saves context, logs a `session_error`, reports `Progress.TurnEnd(turn, "max_steps_exceeded", step)`, and returns `OutcomeMaxStepsExceeded`.
 
 `dispatchToolCall(ctx, step, call)`:
 1. Unmarshals `call.Function.Arguments` (a JSON string) into `map[string]any`; a malformed payload degrades to an empty args map rather than erroring.
 2. Logs + reports the tool call (the `Progress.ToolCall` report also emits the compact interactive `|ToolCall : ` notice when `ShowToolCalls` is set and `-v` is off), then calls `Tools.Execute`.
 3. Computes a `callSignature{name, argsJSON, resultJSON}` and compares it to `a.lastSignature`: equal → `a.repeatCount++`, otherwise reset to `1`; always updates `a.lastSignature`. If `Config.MaxRepeatedToolCalls > 0 && repeatCount > MaxRepeatedToolCalls`, the tool output is prefixed with a `[LOOP DETECTED] ...` notice and a `loop_guard_triggered` event is logged, **instead of** forwarding the raw repeated result.
-4. If `Config.ManageContext`, passes the (possibly loop-guard-annotated) output through `Context.TruncateToolOutput`, logging a `context_truncation` event if truncation actually occurred.
-5. Logs + reports the tool result (output truncated to 500 chars in the log/transcript summary, regardless of the context-management truncation above, which operates on what's sent back to the model).
-6. Returns a `{Role: llm.RoleTool, ToolCallID: call.ID, Content: output}` message.
+4. If `Config.ManageContext && Config.ContextConfig.TruncateToolOutputs`, passes the (possibly loop-guard-annotated) output through `Context.TruncateToolOutput`, logging a `context_truncation` event if truncation actually occurred.
+5. Logs + reports the tool result with the full raw output, success/exit/latency, and—when truncation or the loop guard changed it—the exact model-visible content plus spool/omitted metadata.
+6. Returns a `{Role: llm.RoleTool, ToolCallID: call.ID, Content: output}` message. The caller saves the complete step to `context.json` after all tool results are appended.
 
 `internal/cliapp.runInteractive` supplies the `readPrompt`/`onTurnResult` callbacks (stdin reading, `/exit`/`/quit` handling, stdout/stderr output); `Agent` itself has no knowledge of stdin, stdout, or CLI text commands.
+
+---
+
+### 2.9 Persistent Sessions (`internal/session/`)
+
+`internal/session` owns session identity, layout, locking, manifests, and context persistence.
+
+```go
+type Info struct {
+    ID, RunID, Dir, ManifestPath, ContextPath, LogDir, SpoolDir, LockPath string
+    Lock *Lock
+    PreviousRunUnfinished bool
+}
+type Manifest struct {
+    Version int; ID string; CreatedAt, LastUsedAt time.Time
+    RunCount, TurnCount int
+    Model, BaseURL string
+    Runs []RunRecord
+}
+type RunRecord struct {
+    RunID string; StartedAt time.Time
+    FinishedAt *time.Time; Outcome string; ExitCode *int
+}
+
+func Create(topDir string, opts Options) (*Info, error)
+func Resume(topDir, id string, opts Options) (*Info, error)
+func LatestID(topDir string) (string, error)
+func FinishRun(info *Info, outcome string, exitCode int) error
+func SetTurnCount(info *Info, turn int) error
+func SaveContext(info *Info, messages []llm.Message) error
+func LoadContext(info *Info) ([]llm.Message, error)
+func ValidateMessages(messages []llm.Message) error
+```
+
+- IDs are 3 or 4 lowercase English words joined by hyphens, generated from embedded curated lists. `Create` claims an ID with an atomic `os.Mkdir(dir, 0700)`, retrying on collision up to 100 times.
+- `Resume` validates the ID and manifest, rejects symlinks, acquires an exclusive `flock` on `<session>/.lock` (plus an in-process lock), verifies that `context.json` exists, appends a new run record, and returns the session layout.
+- `LatestID` scans valid session manifests under `top_dir` and returns the one with the newest `LastUsedAt`.
+- `previousRunUnfinished` is true when the immediately preceding run record has no `FinishedAt`; the CLI warns on resume.
+- `context.json` schema:
+  ```json
+  {
+    "version": 1,
+    "session_id": "brave-otter-runs",
+    "updated_at": "...",
+    "messages_sha256": "...",
+    "messages": [ ... ]
+  }
+  ```
+- `SaveContext` validates the message sequence, computes a SHA-256 over the canonical message JSON, writes to a same-directory temp file with `0600`, syncs, and atomically renames over `context.json`. The previous blob remains intact if anything fails.
+- `ValidateMessages` requires one leading system message, optional summary only at index 2, complete assistant tool-call/result pairs, and no orphaned tool messages or unanswered calls.
+- `FinishRun` records `finished_at`, outcome, and exit code for the current run; unfinished records are preserved for diagnostics.
 
 ---
 
@@ -739,58 +827,38 @@ cliapp.Run(argv, stdin, stdout, stderr) int
      │
      ├─► args, err := parseArgs(argv)                       // flag.FlagSet, stdlib only
      ├─► handle -h / --version (early return)
-     ├─► reject -i + -p together
+     ├─► reject -i + -p together; reject -r + --resume-last together
      ├─► check required flags (-p unless -i)
-     ├─► resolve system prompt (-s, or ~/.litegent/system.md; created if absent)
-     ├─► systemBytes := os.ReadFile(resolvedSystemPath)
+     ├─► resolve config path (-c or ~/.litegent/config.json) and load/validate
+     ├─► cfg.TopDir -> resolve system prompt (-s or <top_dir>/system.md; create only on new)
      ├─► promptBytes := os.ReadFile(args.promptPath)         // skipped if -i
-     ├─► resolve config path (-c or ~/.litegent/config.json)
-     ├─► cfg, err := config.Load(resolvedConfigPath)
-     ├─► if -k: skillsXML, err := skills.BuildSkillsPrompt(args.skillsPath)
-     │          systemPrompt += "\n\n" + skillsXML            // if non-empty
-     ├─► logger, err := logging.New(cfg.LogDir, cfg.APIKey)
-     ├─► registry := buildRegistry(cfg)                       // registers enabled tools
-     ├─► llmClient := llm.NewClient(cfg)
-     ├─► ctxManager := ctxmgr.NewManager(cfg.ContextConfig, llmClient)
-     ├─► ag := agent.New(cfg, llmClient, registry, ctxManager, logger)
-     ├─► prog := progress.New(args.verbose, stderr, cfg.APIKey); ag.Progress = prog
-     ├─► ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-     ├─► logger.LogSessionStart(sessionID, cfg.Model, cfg.BaseURL)
-     ├─► prog.Startup(cfg.Model, cfg.BaseURL, len(registry.Schemas()), args.interactive)
+     ├─► skillsPath := -k or cfg.SkillsDir; load if present
+     ├─► if resuming: LatestID/Resume -> load context.json -> warn on prompt drift
+     │   else:        session.Create -> save initial [system] context
+     ├─► cfg.LogDir/SpoolDir = session paths
+     ├─► logger := logging.NewWithRunID(session.LogDir, cfg.APIKey, session.RunID)
+     ├─► registry/llmClient/ctxManager/agent; ag.Store = session store
+     ├─► prog := progress.New(args.verbose, stderr, cfg.APIKey)
+     ├─► ctx, cancel := context.WithCancel; signal.Notify(SIGINT/SIGTERM)
+     ├─► logger.LogSessionStart(session.ID, runID, resumed, model, baseURL, cwd, systemPrompt)
+     ├─► prog.Startup(...)
      │
-     ├───► if args.interactive:
-     │        return runInteractive(ctx, ag, systemPrompt, cfg, prog, stdin, stdout, stderr)
-     │            │
-     │            ├─► result := ag.RunInteractive(ctx, systemPrompt, readPrompt, onTurnResult)
-     │            ├─► prog.SessionEnd(result.Outcome.String(), result.Steps)
-     │            └─► map result.Outcome -> exit code (interrupted/llm_error/else success)
+     ├───► if interactive:
+     │        result := ag.RunInteractiveWithHistory(ctx, history, startTurn, readPrompt, onTurnResult)
      │
-     └───► else (single-shot):
-              result := ag.Run(ctx, systemPrompt, string(promptBytes))
-              prog.SessionEnd(result.Outcome.String(), 1)
-              switch result.Outcome:
-                 Success            -> print result.FinalMessage to stdout, print the ----====---- turn separator, return 0
-                MaxStepsExceeded   -> print to stderr, return 2
-                Interrupted        -> print to stderr, return 130
-                LLMError (default) -> print to stderr, return 3
+     └───► else single-shot:
+              result := ag.RunWithHistory(ctx, history, string(promptBytes), startTurn+1)
+     │
+     └─► finalizeRun: LogRunEnd, Sync logs, FinishRun(manifest run record), return exit code
 
-ag.Run(ctx, systemPrompt, userPrompt) / ag.RunInteractive(ctx, systemPrompt, readPrompt, onTurnResult)
-     │
-     └─► both call the shared runTurn(ctx, messages, turn) loop described in Section 2.8
-              │
-              ├─► ctxmgr.Manager.Prepare(ctx, messages)         // Stage 2/3, if manage_context
-              ├─► logger.LogLLMRequest() + progress.Request()
-              ├─► llm.Client.ChatCompletion(ctx, messages, registry.Schemas())
-              ├─► logger.LogLLMResponse() + progress.Response()
-              │
-              ├───► no tool_calls: append final message, logger.LogFinish(), return OutcomeSuccess
-              │
-              └───► tool_calls present: for each call,
-                       tools.Registry.Execute(ctx, call.Function.Name, args)
-                       loop-guard check -> ctxmgr.Manager.TruncateToolOutput()
-                       logger.LogToolResult() + progress.ToolResult()
-                       append {RoleTool, ToolCallID, Content} to messages
-                     loop back to Prepare for the next step
+runTurn(ctx, messages, turn)
+     ├─► ctxmgr.Manager.Prepare -> PrepareResult; log pruning/summary; save context if changed
+     ├─► logger.LogLLMRequest(context SHA) + progress.Request()
+     ├─► llm.Client.ChatCompletion(...)
+     ├─► logger.LogLLMResponse(...) + progress.Response()
+     ├─► no tool_calls: append final assistant, save context, LogFinish, return success
+     └─► tool_calls: execute each, log full args/result, append tool messages,
+         save context after the complete step, loop
 ```
 
 ---
@@ -801,7 +869,7 @@ Litegent deliberately runs **unconfined**: there is no sandbox, chroot, containe
 
 1. **Unconfined Host Access**:
    - `internal/tools` performs no boundary checks. `bash`, `read_file`, `write_file`, `edit_file`, `glob_search`, and `grep_search` accept and resolve any absolute or relative path the OS permissions allow — including paths well outside the invocation directory.
-   - `spool_dir` (default `.tmp/tool_outputs`) and `log_dir` (default `./logs`) are ordinary configuration defaults chosen for tidy organization, not enforced boundaries; both accept any path.
+   - `spool_dir` (default `spool`) and `log_dir` (default `logs`) are session-relative directories under `<top_dir>/<session-id>/`; they keep session artifacts tidy but are not access boundaries for tools.
 2. **Host Command Safety & Non-Interactive Execution**:
    - Commands executed through `bash` run under the privileges of the executing user, in any `workdir` requested.
    - A `context.WithTimeout` deadline, `exec.CommandContext`'s default `cmd.Cancel` behavior (kill on cancellation), and an explicit `cmd.WaitDelay` grace period together prevent orphaned or zombie shell processes regardless of what the command does.
@@ -815,4 +883,6 @@ Litegent deliberately runs **unconfined**: there is no sandbox, chroot, containe
  5. **Secret Masking**:
     - `LitegentConfig.APIKey` is masked everywhere it could otherwise leak: the dual audit log (`internal/logging.Logger.redact`), the config display helper (`LitegentConfig.MaskedAPIKey`), and the live progress stream (`internal/progress.Reporter.mask`) all scrub the literal key out of any string before writing. All three share one rule: preserve the key's own stub prefix (`<first 3 chars>...<last 4 chars>`, e.g. `sk-...1234`, `r9_...1234`) and mask keys of 7 characters or fewer entirely (`****`).
 6. **Clean Exit Handlers**:
-   - `defer`-based cleanup on the log file handles (`Logger.Close`) and the signal context's `cancel` function ensure logs are flushed and closed even under `SIGINT`/`SIGTERM`.
+   - Every exit path calls `finalizeRun`, which writes the run footer, syncs logs, and records the run outcome/exit code in `session.json`.
+   - The agent saves `context.json` at safe boundaries and after final answers; compaction saves it before the next request.
+   - `defer` cleanup closes the session lock and log handles. A second signal forces exit after a best-effort log sync. Panics are recovered at the CLI layer, logged with a stack trace, and finalized.

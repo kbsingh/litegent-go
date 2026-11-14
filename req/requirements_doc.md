@@ -52,7 +52,7 @@ Modern AI coding and operations agents often suffer from:
   
 - **FR-1.2: System Prompt File (`-s, --system`)**  
   - Shall accept an optional path pointing to a readable file containing the system prompt.
-  - When the flag is omitted, Litegent must create `~/.litegent/system.md` (and its parent directory) with the built-in default system prompt if the file does not exist, then load it. The built-in prompt is quoted in `req/user_guide.md` Section 5.1. An existing file must never be overwritten.
+  - When the flag is omitted, Litegent must use `<top_dir>/system.md`. For a new session, it must create that file (and its parent directory) with the built-in default system prompt if it does not exist, then load it. A resumed session must never create or replace its stored system prompt. The built-in prompt is quoted in `req/user_guide.md` Section 5.1. An existing file must never be overwritten.
   - If the flag is provided but the file does not exist or is not readable, Litegent must exit immediately with an error message and exit code `1`.
 
 - **FR-1.3: User Prompt File (`-p, --prompt`)**  
@@ -61,12 +61,14 @@ Modern AI coding and operations agents often suffer from:
 
 - **FR-1.4: Configuration File (`-c, --config`)**  
   - Shall accept an optional path pointing to a valid JSON configuration file.
-  - When the flag is omitted, Litegent must use `~/.litegent/config.json`. If that file does not exist, Litegent must create it (and its parent directory) with the documented example values, using `${OPENAI_API_KEY}` as the API-key placeholder, then proceed.
+  - When the flag is omitted, Litegent must bootstrap from `~/.litegent/config.json`. If that file does not exist, Litegent must create it (and its parent directory) with the documented example values, using `${OPENAI_API_KEY}` as the API-key placeholder, then proceed.
+  - `top_dir` comes from the loaded config. When omitted from the config, it defaults to the directory containing the config file; for the bootstrap config that is `~/.litegent`.
   - If an explicitly supplied file does not exist, or the resolved file cannot be read, has invalid syntax, or has missing/invalid required fields, Litegent must exit immediately with a descriptive error and exit code `1`.
 
 - **FR-1.5: Skills Directory (`-k, --skills`)**  
   - Shall accept an optional path pointing to a directory containing skill documentation files.
-  - If specified, Litegent must recursively discover all Markdown (`*.md`) files in this directory.
+  - If specified, Litegent must recursively discover all Markdown (`*.md`) files in this directory. `-k` overrides `skills_dir` from configuration.
+  - When `-k` is omitted, `skills_dir` defaults to `<top_dir>/skills`; a missing default directory means no skills.
   - If the directory does not exist when `-k` is passed, Litegent must exit with an error.
 
 - **FR-1.6: Informational Flags**  
@@ -77,6 +79,12 @@ Modern AI coding and operations agents often suffer from:
   - Shall accept an optional flag that switches Litegent into a persistent, multi-turn session instead of a single task.
   - Conflicts with `-p/--prompt`: passing both must exit immediately with an error and exit code `1`.
   - When `-i` is set, `-p` is not required; task prompts are instead read one at a time from stdin.
+
+- **FR-1.8: Session Resume Flags**  
+  - `-r, --resume <session-id>` must resume an existing session.
+  - `--resume-last` must resume the most recently used valid session.
+  - The two flags are mutually exclusive; passing both must exit with code `1`.
+  - A missing, invalid, corrupt, symlinked, or locked session must produce a descriptive error and exit code `1`; Litegent must never fall back to creating a new session.
 
 ---
 
@@ -107,7 +115,7 @@ Modern AI coding and operations agents often suffer from:
   The loop must respect a configurable `max_steps` ceiling (default: `30`). If reached without a final response, Litegent must halt, notify the user on stderr, and exit with code `2`.
 
 - **FR-2.4: Signal Handling & Cancellation**  
-  Litegent must trap `SIGINT` (Ctrl+C) and `SIGTERM`, terminate any active subshell processes cleanly, flush all in-memory logs to disk, and exit with code `130`.
+  Litegent must trap `SIGINT` (Ctrl+C) and `SIGTERM`, terminate any active subshell processes cleanly, persist the last valid context, finalize the run record, sync all logs to disk, and exit with code `130`. A second signal must force immediate exit after a best-effort log sync.
 
 - **FR-2.5: Repeated Tool-Call Loop Guard**  
   The loop must track recent `(tool_name, arguments, result)` triples. When the same triple recurs more than `max_repeated_tool_calls` consecutive times (default: `3`), Litegent must append a synthetic tool-result note (e.g. `[LOOP DETECTED] This exact call already produced this result. Try a different approach.`) instead of forwarding the repeated result silently, and record a `loop_guard_triggered` trace event.
@@ -119,29 +127,36 @@ Modern AI coding and operations agents often suffer from:
 
 ### 4.3 Context Management Capabilities (`manage_context`)
 
-- **FR-3.1: Master Switch**  
-  A top-level configuration boolean `manage_context` shall enable or disable the entire context management subsystem. When `manage_context` is `false`, conversation history is forwarded to the LLM unmodified without truncation or window pruning.
+- **FR-3.1: Master Switch and Truncation Toggle**  
+  A top-level configuration boolean `manage_context` shall enable or disable the entire context management subsystem. When `manage_context` is `false`, conversation history is forwarded to the LLM unmodified without truncation or window pruning. When it is true, `context_config.truncate_tool_outputs` independently enables or disables tool-output truncation.
 
 - **FR-3.2: Tool Output Truncation & Spooling**  
-  When `manage_context` is `true`:
+  When `manage_context` and `truncate_tool_outputs` are both `true`:
   - Any single tool return exceeding `max_tool_output_chars` (default: 4000 characters) must be truncated.
-  - The entire untruncated output must be written to a temporary spool file under `spool_dir` (default: `.tmp/tool_outputs/<call_id>.txt` within the working directory).
-  - The tool message returned to the model must include:
-    1. The head of the output (e.g. first 2000 characters).
-    2. A truncation notice: `[Truncated: <X> characters omitted. Full content saved to <path>. Use read_file to inspect specific lines if needed.]`.
-    3. The tail of the output (e.g. last 1000 characters).
+  - The entire untruncated output must be written to `<session-dir>/<spool_dir>/output_<call_id>.txt` (default `spool/` inside the session).
+  - The tool message returned to the model must include a head, a truncation notice naming the omitted count and spool path, and a tail.
+  - Both the full raw output and the exact model-visible content must be recorded in the human and trace logs.
 
 - **FR-3.3: Sliding Window History**  
   When `manage_context` is `true`:
-  - When the message list length exceeds `window_size` turns (default: 20):
+  - When the active message list exceeds `window_size` **messages** (default: 40):
     - System prompt (index 0) and initial user prompt (index 1) **must never be dropped**.
-    - The oldest intermediate tool execution turns must be evicted from the active context.
+    - Eviction must operate on whole units and must never split an assistant tool-call message from its tool results.
+    - At least the most recent unit must be retained even if it alone exceeds the window.
+    - The oldest intermediate units must be evicted from the active context.
 
 - **FR-3.4: Conversation Summarization**  
-  When `manage_context` is `true` and the sliding window (FR-3.3) evicts turns:
-  - If `max_context_tokens` is configured as a positive value and the pre-eviction estimated token count does **not** exceed it, the evicted turns must simply be dropped — no summarization call is made, avoiding an unnecessary LLM round-trip on every window overflow.
-  - Otherwise (the estimate exceeds `max_context_tokens`, or `max_context_tokens` is unset/non-positive), the evicted message turns must be passed to a summarization prompt, and the resulting summary must be maintained as a persistent `<context_summary>` message placed directly after the first user message in the conversation.
-  - Summarization must never be triggered independently of a window eviction — it is a consequence of FR-3.3, not a standalone token-count trigger.
+  When `manage_context` is `true` and the sliding window (FR-3.3) evicts messages:
+  - If `max_context_tokens` is configured as a positive value (default: 32000) and the pre-eviction estimated token count does **not** exceed it, the evicted messages must simply be dropped — no summarization call is made.
+  - Otherwise, the evicted messages must be passed to a summarization prompt, and the resulting summary must be maintained as a persistent `<context_summary>` message placed directly after the first user message.
+  - Summarization must never be triggered independently of a window eviction.
+
+- **FR-3.5: Durable Context Blob**  
+  - The effective, post-compaction message list must be persisted to `<session-dir>/context.json` at every safe boundary: after user input, after compaction, after a complete tool step, and after a final assistant answer.
+  - The blob must be validated (system first, summary only at index 2, complete tool-call/result pairs) and written atomically via temp file + fsync + rename.
+  - Compaction must update the blob before the next LLM request that uses the compacted context.
+  - A resumed session must load and validate the blob before making any LLM request.
+  - A missing, corrupt, hash-mismatched, or structurally invalid blob must hard-fail resume.
 
 ---
 
@@ -205,20 +220,24 @@ Litegent shall provide native Go implementations of the following core tools:
 
 ### 4.6 Dual Interaction Logging
 
-- **FR-6.1: Destination Directory**  
-  All session logs must be saved under the directory specified by `log_dir` in configuration (default: `./logs/`). If the directory does not exist, it must be created automatically.
-  
-- **FR-6.2: JSONL Trace File (`trace_<timestamp>.jsonl`)**  
-  Must record an append-only JSON line for every system event:
-  - Event types: `session_start`, `llm_request`, `llm_response`, `tool_call`, `tool_result`, `context_truncation` (only emitted when a tool output was actually truncated), `loop_guard_triggered` (only emitted when the loop guard actually fires), `session_finish` (once per successfully completed turn — in interactive mode this fires once per turn, not once per process), `session_error` (fatal error, interruption, or a turn exceeding `max_steps`).
-  - Every line must include: `timestamp` (ISO 8601 UTC), `event_type`, `step` (int), and an event-specific `data` payload.
-  - Sensitive API keys must be masked wherever their literal text could appear, not only in a dedicated field.
+- **FR-6.1: Destination Directories**  
+  - Each session must have a directory `<top_dir>/<session-id>/`.
+  - `log_dir` and `spool_dir` are session-relative (defaults `logs` and `spool`); they must not be absolute or escape the session directory.
+  - Each run gets unique, per-run filenames inside `logs/`.
 
-- **FR-6.3: Human-Readable Session Log (`session_<timestamp>.log`)**  
-  Must record a clean, sequential narrative transcript:
-  - Header: Session ID, start timestamp, model name, base URL.
-  - Per Step: Step number, LLM thought/reasoning, tool calls with formatted parameters, tool results with summary counts.
-  - Footer: Final response, completion timestamp, total steps, total token usage.
+- **FR-6.2: JSONL Trace File (`trace_<run-id>.jsonl`)**  
+  Must record an append-only JSON line for every system event:
+  - Event types: `session_start`, `user_prompt`, `llm_request`, `llm_response`, `tool_call`, `tool_result`, `context_truncation`, `context_pruning`, `context_summary`, `loop_guard_triggered`, `turn_finish`, `session_finish`, `run_finish`, `session_error`.
+  - Every line must include `timestamp` (ISO 8601 UTC), `event_type`, `turn`, `step`, and an event-specific `data` payload.
+  - User prompts, assistant content, full tool arguments, full tool output, and model-visible truncated content must be captured.
+  - Sensitive API keys must be masked recursively wherever their literal text could appear, including nested tool arguments.
+
+- **FR-6.3: Human-Readable Session Log (`session_<run-id>.log`)**  
+  Must record a clean, sequential, parseable narrative transcript:
+  - Header: session ID, run ID, resumed flag, start timestamp, model, base URL, working directory, and full system prompt/skills.
+  - Per turn: full user input, assistant content, tool calls with full JSON arguments, full tool output, truncation metadata and exact model-visible content when different, context pruning counts, and full summaries.
+  - Footer: run outcome, exit code, step/token totals.
+  - Every record must use stable prefixes and delimiters so the flow can be parsed.
 
 ---
 
@@ -248,7 +267,31 @@ Litegent shall provide native Go implementations of the following core tools:
   When `-v` is set, Litegent must stream concise, single-line progress updates to stderr as the loop runs — distinct from and in addition to the dual audit log (Section 4.6), which is written to disk for after-the-fact review.
   - Must report: session/turn startup (mode, model, endpoint, tool count), per-turn start, context pruning when the message count changes, per-step LLM request/response timing and tool-call count, per-tool-call arguments and per-result success/duration, turn completion, and session completion.
   - Configured secrets (e.g. the API key) must be masked in all progress output.
-  - When `-v` is not set, stderr stays quiet apart from fatal error messages, the interactive `> ` prompt, and the interactive tool-call notice required by FR-7.5.
+  - When `-v` is not set, stderr stays quiet apart from the startup session line, fatal error messages, the interactive `> ` prompt, and the interactive tool-call notice required by FR-7.5.
+
+---
+
+### 4.9 Persistent Sessions and Resume
+
+- **FR-9.1: Session Identity**  
+  - Every run without a resume flag must create a new session ID: 3 or 4 lowercase English words joined by hyphens (e.g. `brave-otter-runs`).
+  - IDs must be unique within `top_dir`; uniqueness must be enforced by atomic directory creation, with regeneration on collision.
+  - Reserved names (`config.json`, `system.md`, `skills`, `logs`, `spool`, `tmp`, `sessions`) must never be used.
+
+- **FR-9.2: Session Layout**  
+  - `<top_dir>/<session-id>/` must contain `session.json`, `context.json`, `.lock`, `logs/`, and `spool/`.
+  - `session.json` must record ID, timestamps, run/turn counts, model/base URL, and per-run records with start/finish/outcome/exit code.
+  - The session directory must be mode `0700`; manifest and context blobs must be mode `0600`.
+
+- **FR-9.3: Resume**  
+  - `-r <session-id>` and `--resume-last` must reuse an existing session and must not generate a new ID.
+  - Resume must validate the ID, reject symlinks, verify the manifest and context blob, and acquire an exclusive lock before continuing.
+  - A resumed run must continue turn numbering and append new per-run logs/spool files.
+  - The stored system message must be used; if the current prompt/skills differ, Litegent must warn but preserve the stored prompt.
+  - If the immediately preceding run did not finish, resume must warn and continue from the last valid context.
+
+- **FR-9.4: Hard Failure**  
+  Missing, invalid, corrupt, symlinked, or locked sessions must exit with code `1` and must not create a new session or log files.
 
 ---
 
@@ -266,12 +309,12 @@ Litegent shall provide native Go implementations of the following core tools:
 - **NFR-3.1**: Subprocess execution must enforce timeouts to prevent orphaned, hanging processes.
 - **NFR-3.2**: Configuration parser must support environment variable references (`${OPENAI_API_KEY}`) to avoid storing cleartext secrets on disk.
 - **NFR-3.3**: Raw API keys must never be written to JSONL trace logs or console output.
-- **NFR-3.4: Unconfined Host Operation**: Litegent is intentionally **not** sandboxed. It operates with the full filesystem and process privileges of the invoking user, across the entire host — not just the invocation directory. No path jail, working-directory confinement, or tool-level access restriction is applied to `bash`, `read_file`, `write_file`, `edit_file`, `glob_search`, or `grep_search`; any of these may address any absolute or relative path, including locations outside the invocation directory, that the OS permissions allow. `spool_dir` and `log_dir` default to paths under the working directory purely for tidy organization, not as an access boundary — they are freely reconfigurable to any path. The comprehensive dual audit log (Section 4.6) is the system's primary safety and accountability control in place of sandboxing; operators are expected to scope the system prompt and run Litegent under a user account whose privileges already match their risk tolerance.
+- **NFR-3.4: Unconfined Host Operation**: Litegent is intentionally **not** sandboxed. It operates with the full filesystem and process privileges of the invoking user, across the entire host — not just the invocation directory. No path jail, working-directory confinement, or tool-level access restriction is applied to `bash`, `read_file`, `write_file`, `edit_file`, `glob_search`, or `grep_search`; any of these may address any absolute or relative path, including locations outside the invocation directory, that the OS permissions allow. `spool_dir` and `log_dir` are session-relative for per-session containment and are not an access boundary for tools: `bash`, file, and search tools remain unconfined. The comprehensive dual audit log (Section 4.6) is the system's primary safety and accountability control in place of sandboxing; operators are expected to scope the system prompt and run Litegent under a user account whose privileges already match their risk tolerance.
 - **NFR-3.5: Non-Interactive Subprocess Execution**: To prevent the agentic loop from stalling on a blocked subprocess, every `bash` invocation must run non-interactively: standard input must never be inherited from a controlling terminal (it must read as immediately empty/EOF), and common interactive behaviors (pagers, editors, confirmation prompts) must be neutralized via environment overrides (e.g. `GIT_PAGER=cat`, `PAGER=cat`, `GIT_TERMINAL_PROMPT=0`, `DEBIAN_FRONTEND=noninteractive`, `TERM=dumb`) layered on top of the inherited environment. The configured `timeout` remains the hard backstop if a command blocks regardless.
 - **NFR-3.6: Repeated Tool-Call Loop Guard**: The agentic loop must detect when an identical tool call (same name and arguments) produces an identical result more than `max_repeated_tool_calls` times in a row (default: `3`) and inject a corrective notice into the conversation instead of silently continuing, so the model is nudged to change strategy well before `max_steps` is exhausted.
 
 ### 5.4 Maintainability & Compatibility
-- **NFR-4.1**: Written in modern Go 1.22+ following idiomatic Go conventions (`gofmt`-clean, passes `go vet`), with exported types, functions, and packages documented via standard Go doc comments.
+- **NFR-4.1**: Written in modern Go 1.26.8+ following idiomatic Go conventions (`gofmt`-clean, passes `go vet`), with exported types, functions, and packages documented via standard Go doc comments.
 - **NFR-4.2**: Compatible with all major OpenAI-compatible API providers (OpenAI, OpenRouter, DeepSeek, Groq, Ollama, vLLM).
 
 ---
@@ -280,5 +323,5 @@ Litegent shall provide native Go implementations of the following core tools:
 
 1. **Autonomous Task Completion**: The agent runs start-to-finish on standard tasks without manual intervention.
 2. **Context Window Adherence**: Under high-volume command output (e.g. >100,000 characters), token consumption remains within defined ceilings without API context length errors.
-3. **Audit Completeness**: 100% of LLM calls, tool inputs, and tool outputs are captured in both JSONL and transcript logs.
+3. **Audit Completeness**: 100% of user inputs, LLM calls, assistant outputs, tool inputs, and tool outputs are captured in both JSONL and transcript logs, including full raw output and exact model-visible content when truncation applies.
 4. **Zero MCP Overhead**: No background MCP daemon or network transport layer is needed to execute bash or file operations.

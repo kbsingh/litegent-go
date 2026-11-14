@@ -21,13 +21,13 @@ Litegent requires **zero external servers or MCP daemons**—all tools are built
 
 ### System Prerequisites
 - Linux OS (Ubuntu 22.04+, Debian 12+, Fedora 39+, RHEL 9+, Arch Linux)
-- Go 1.22 or newer (only required to build from source; a precompiled `litegent` binary needs no Go toolchain at run time)
+- Go 1.26.8 or newer (only required to build from source; a precompiled `litegent` binary needs no Go toolchain at run time)
 - Access to an OpenAI-compatible API endpoint (OpenAI, OpenRouter, DeepSeek, Groq, or local Ollama/vLLM)
 
 ### Installation
 Clone or navigate to the repository and build Litegent:
 ```bash
-cd /home/rh-claude/src/litegent_son_py
+cd /path/to/litegent-go
 go build -o litegent ./cmd/litegent
 ```
 Or install it onto your `$GOPATH/bin` (typically on `PATH`) in one step:
@@ -57,30 +57,41 @@ Use `install.sh` instead when you want the full vet/test gate and a shippable st
 Litegent is executed from the terminal using clear file-based parameters:
 
 ```bash
-litegent [-s <system_prompt_file>] -p <user_prompt_file> [-c <config_file>] [-k <skills_directory>] [-v]
+litegent [-s <system_prompt_file>] -p <user_prompt_file> [-c <config_file>] [-k <skills_directory>] [-v] [-r <session-id> | --resume-last]
 ```
 
 Or, for a persistent, multi-turn session (see Section 5.4):
 
 ```bash
-litegent [-s <system_prompt_file>] -i [-c <config_file>] [-k <skills_directory>] [-v]
+litegent [-s <system_prompt_file>] -i [-c <config_file>] [-k <skills_directory>] [-v] [-r <session-id> | --resume-last]
 ```
+
+Without a resume flag, every invocation creates a new session. Use `-r` or `--resume-last` to continue an existing one (Section 5.6).
 
 ### Argument Descriptions
 
 | Flag | Full Name | Required? | Description |
 |---|---|---|---|
-| `-s` | `--system` | No | Path to the file containing the system prompt (agent role, principles, constraints). Defaults to `~/.litegent/system.md`; if that file is absent, Litegent creates it with the built-in default system prompt (see Section 5.1). |
+| `-s` | `--system` | No | Path to the file containing the system prompt (agent role, principles, constraints). Defaults to `<top_dir>/system.md`; for a new session that file is created with the built-in default prompt when absent (see Section 5.1). |
 | `-p` | `--prompt` | Yes, unless `-i` is set | Path to the file containing the execution prompt (task instructions, requirements). Conflicts with `-i`. |
-| `-c` | `--config` | No | Path to the JSON configuration file (`.json`). Defaults to `~/.litegent/config.json`. |
-| `-k` | `--skills` | No | Path to a directory containing skill Markdown files (`*.md`) to inject into context. |
+| `-c` | `--config` | No | Path to the JSON configuration file (`.json`). When omitted, the bootstrap config is `~/.litegent/config.json`. `top_dir` in that file governs session and default-file locations. |
+| `-k` | `--skills` | No | Path to a directory containing skill Markdown files (`*.md`) to inject into context. Overrides `skills_dir` from config; defaults to `<top_dir>/skills` when that directory exists. |
 | `-i` | `--interactive` | No | Run a persistent, multi-turn session, reading task prompts from stdin instead of `-p`. |
+| `-r` | `--resume` | No | Resume an existing session by ID. Conflicts with `--resume-last`. |
+| | `--resume-last` | No | Resume the most recently used valid session. Conflicts with `-r`. |
 | `-v` | `--verbose`| No | Stream live progress to stderr as the loop runs (see Section 5.5). |
 | `-h` | `--help` | No | Show help message and command syntax. |
 
 ### Output
 
-On success, the agent's final response is printed to stdout followed by a `----====----` separator line — in single-shot and interactive mode alike. Tool-call notices (`|ToolCall : ...`) appear on stderr **only in interactive sessions** (Section 5.4); a single-shot run without `-v` stays silent on stderr apart from fatal errors. With `-v`, detailed per-step progress streams to stderr in both modes (Section 5.5).
+On success, the agent's final response is printed to stdout followed by a `----====----` separator line — in single-shot and interactive mode alike. At startup Litegent always prints the active session and directory to stderr, for example:
+
+```text
+litegent: session brave-otter-runs (/home/user/.litegent/brave-otter-runs)
+litegent: resumed session brave-otter-runs (/home/user/.litegent/brave-otter-runs)
+```
+
+Tool-call notices (`|ToolCall : ...`) appear on stderr **only in interactive sessions** (Section 5.4); a single-shot run without `-v` otherwise stays silent on stderr apart from the session line and fatal errors. With `-v`, detailed per-step progress streams to stderr in both modes (Section 5.5).
 
 ---
 
@@ -88,19 +99,25 @@ On success, the agent's final response is printed to stdout followed by a `----=
 
 Litegent accepts **JSON configuration files only**. Environment variables matching `${VAR_NAME}` or `${VAR_NAME:-default}` are automatically interpolated at runtime.
 
-When `-c` is omitted, Litegent reads `~/.litegent/config.json`. When `-s` is omitted, it reads `~/.litegent/system.md`; if that file does not exist, Litegent creates it with the built-in default system prompt (quoted in Section 5.1). Explicit flags always take precedence. Put your durable defaults in `~/.litegent/`:
+When `-c` is omitted, Litegent bootstraps from `~/.litegent/config.json`. When `-c` is supplied, that file is authoritative. `top_dir` comes from the loaded config; if omitted, it defaults to the directory containing the config file. For the default bootstrap config that is `~/.litegent`, so the historical layout is preserved:
 
 ```text
 ~/.litegent/
-├── config.json   # default configuration (used when -c is omitted)
-└── system.md     # default system prompt (created on first run if absent)
+├── config.json   # bootstrap configuration (used when -c is omitted)
+├── system.md     # default system prompt (created on first run if absent)
+├── skills/       # optional shared skills directory
+└── brave-otter-runs/
+    └── ...        # per-session logs, spool, context, and manifest
 ```
 
-If `-c` is omitted and `~/.litegent/config.json` does not exist, Litegent creates it (and `~/.litegent/` itself) with the documented example values, then continues. The generated file uses `"${OPENAI_API_KEY}"` as its API-key placeholder, so no real credential is written, and an existing config is never overwritten. Likewise, if `-s` is omitted and `~/.litegent/system.md` does not exist, Litegent writes the built-in default prompt there. Litegent prints a one-line notice to stderr when it creates either file.
+If `-c` is omitted and `~/.litegent/config.json` does not exist, Litegent creates it (and `~/.litegent/` itself) with the documented example values, then continues. The generated file uses `"${OPENAI_API_KEY}"` as its API-key placeholder, so no real credential is written, and an existing config is never overwritten. For a new session, if `-s` is omitted and `<top_dir>/system.md` does not exist, Litegent writes the built-in default prompt there. A resumed session never creates or replaces its stored system prompt.
+
+`log_dir` and `spool_dir` are **relative to the session directory** and must not be absolute or escape it. `skills_dir` is relative to `top_dir` (or may be absolute).
 
 ### Complete JSON Configuration Example (`config.json`)
 ```json
 {
+  "top_dir": "~/.litegent",
   "base_url": "https://api.openai.com/v1",
   "api_key": "${OPENAI_API_KEY}",
   "model": "gpt-4o",
@@ -113,12 +130,14 @@ If `-c` is omitted and `~/.litegent/config.json` does not exist, Litegent create
   "max_repeated_tool_calls": 3,
   "manage_context": true,
   "context_config": {
-    "max_context_tokens": 16000,
+    "max_context_tokens": 32000,
+    "truncate_tool_outputs": true,
     "max_tool_output_chars": 4000,
-    "window_size": 20,
-    "spool_dir": ".tmp/tool_outputs"
+    "window_size": 40,
+    "spool_dir": "spool"
   },
-  "log_dir": "./logs",
+  "log_dir": "logs",
+  "skills_dir": "skills",
   "tools": {
     "bash": {
       "enabled": true,
@@ -137,7 +156,13 @@ If `-c` is omitted and `~/.litegent/config.json` does not exist, Litegent create
 }
 ```
 
-Key fields: `base_url` and `api_key` identify the endpoint; `model`, `temperature`, `max_tokens`, and `timeout` control requests; `max_steps` caps agentic iterations; `max_repeated_tool_calls` controls the loop guard; `manage_context` and `context_config` drive truncation, pruning, and summarization; `log_dir` selects the audit-log destination; and `tools` enables/configures the built-in tool groups. See `examples/config.json` for the same template.
+Key fields: `top_dir` is the root for sessions, system prompt, and shared skills; `base_url` and `api_key` identify the endpoint; `model`, `temperature`, `max_tokens`, and `timeout` control requests; `max_steps` caps agentic iterations; `max_repeated_tool_calls` controls the loop guard; `manage_context` and `context_config` drive truncation, pruning, and summarization; `log_dir` and `spool_dir` are session-relative; `skills_dir` is top-dir-relative; and `tools` enables/configures the built-in tool groups. See `examples/config.json` for the same template.
+
+Notes on context settings:
+- `truncate_tool_outputs` independently enables tool-output truncation. It only takes effect when `manage_context` is true.
+- `max_tool_output_chars` is required only when truncation is enabled.
+- `window_size` is measured in **messages**, not turns.
+- `max_context_tokens` gates summarization after a window eviction.
 
 A few notes on the thinking settings:
 - An empty `thinking_level` behaves exactly like `"default"`: nothing is sent and the model decides.
@@ -149,7 +174,7 @@ A few notes on the thinking settings:
 ## 5. Working with Roles, Prompts & Skills
 
 ### 5.1 Role-Based System Prompts (`-s`)
-If `-s` is omitted, Litegent uses `~/.litegent/system.md`, creating it with the built-in prompt if absent:
+If `-s` is omitted, Litegent uses `<top_dir>/system.md`, creating it with the built-in prompt if absent on a new session:
 
 > you are a helpful, considerate, highly experienced technical assistant. Always confirm, make backups before making changes, remove ambiguity by asking questions, never go beyond the request - stay focused. But when issues and opportunities are discovered, recommend followup actions; when possible consult docs
 
@@ -172,7 +197,7 @@ Re-run `go test ./internal/auth/...` to verify that all tests pass cleanly.
 ```
 
 ### 5.3 Skills Directory (`-k`)
-Skills are standard Markdown files (`*.md`) located inside a directory passed via `-k`. Litegent discovers all `.md` files in the directory and automatically injects them into the agent's context under `<available_skills>`.
+Skills are standard Markdown files (`*.md`) located inside a directory passed via `-k`, or in `skills_dir` from configuration (default `<top_dir>/skills`). `-k` always wins. Litegent discovers all `.md` files in the directory and automatically injects them into the agent's context under `<available_skills>`. A missing default skills directory means “no skills”; a missing explicit `-k` path is an error.
 
 **Example Skill File (`skills/git_workflow.md`)**:
 ```markdown
@@ -229,6 +254,45 @@ Tool-call visibility on stderr, by mode:
 | Interactive (`-i`) | Compact `\|ToolCall : ...` notices (Section 5.4) | Full progress stream — compact notices are suppressed to avoid duplication |
 | Single-shot (`-p`) | Silent apart from fatal errors | Full progress stream |
 
+### 5.6 Sessions and Resume (`-r`, `--resume-last`)
+
+Every run without a resume flag creates a new session. A session ID is a human-readable, randomly generated 3- or 4-word name such as `brave-otter-runs` or `swift-otter-runs-quietly`. It names the session directory and is the key used to resume:
+
+```bash
+# New session
+litegent -p task.md -c ~/.litegent/config.json
+# litegent: session brave-otter-runs (/home/user/.litegent/brave-otter-runs)
+
+# Resume that session by ID
+litegent -i -r brave-otter-runs -c ~/.litegent/config.json
+
+# Resume the most recently used valid session
+litegent -i --resume-last -c ~/.litegent/config.json
+```
+
+Session layout:
+
+```text
+<top_dir>/<session-id>/
+├── session.json      # manifest: ID, timestamps, run/turn counts, outcomes
+├── context.json      # authoritative effective context blob
+├── .lock             # prevents concurrent writers
+├── logs/
+│   ├── session_<run-id>.log
+│   └── trace_<run-id>.jsonl
+└── spool/
+```
+
+Behavior:
+
+- The session ID is generated once and never reused within a `top_dir`.
+- Resuming loads `context.json` and continues the prior conversation; no new session is created.
+- `--resume-last` picks the valid session with the newest `last_used_at`.
+- A missing, invalid, corrupt, or locked session hard-fails with exit code `1`; there is no fallback to a new session.
+- If the stored system prompt or skills differ from the current ones, Litegent warns and keeps the stored prompt for continuity.
+- Each run gets its own `session_<run-id>.log` and `trace_<run-id>.jsonl`.
+- If a previous run did not finish, the next resume reports that warning and continues from the last valid context.
+
 ---
 
 ## 6. Understanding Context Management
@@ -236,47 +300,70 @@ Tool-call visibility on stderr, by mode:
 When `manage_context: true` is configured, Litegent actively protects your model's token budget:
 
 1. **Tool Output Truncation**:
-   - If a command generates thousands of lines (e.g., `git log` or `cat /var/log/syslog`), outputs exceeding `max_tool_output_chars` are truncated.
-   - The full, unmodified output is written to `.tmp/tool_outputs/<call_id>.txt` under `spool_dir` (by default, relative to the working directory — a tidy default, not an access restriction; the agent itself can still read and write anywhere on the host).
+   - Controlled independently by `truncate_tool_outputs` (default `true`). When enabled, outputs exceeding `max_tool_output_chars` are truncated; when disabled, full output is passed through.
+   - The full output is written to `<session-dir>/<spool_dir>/output_<call_id>.txt` (default `spool/output_<call_id>.txt` inside the session).
    - The agent receives the beginning and end of the output, along with a note pointing to the spooled file for surgical inspection using `read_file`.
+   - Both the full raw output and the exact model-visible content are recorded in the human and trace logs.
 
 2. **Sliding Window Pruning**:
-   - Older intermediate tool exchanges are dropped when the conversation exceeds `window_size`.
+   - Older intermediate exchanges are dropped when the active conversation exceeds `window_size` **messages** (default 40). A tool-using turn typically contributes several messages.
+   - Eviction works on whole units: an assistant tool-call message is always evicted with all of its tool results, never split.
    - Your system prompt (`-s`) and the first user message in the conversation (your `-p` file's content in single-shot mode, or the first turn you type in interactive mode) are **permanently anchored** and never pruned.
 
 3. **Progressive Summarization**:
-   - Summarization only happens as a *consequence* of the sliding window evicting turns above — it's not a separate trigger. When that eviction happens: if your estimated conversation tokens are still under `max_context_tokens`, the evicted turns are simply dropped (no extra LLM call). Only once the token estimate actually exceeds `max_context_tokens` are the evicted turns summarized into a `<context_summary>` block instead of dropped outright, preserving key findings and decisions without exhausting context limits.
+   - Summarization only happens as a *consequence* of the sliding window evicting messages — it's not a separate trigger. When that eviction happens: if your estimated conversation tokens are still under `max_context_tokens` (default 32000), the evicted messages are simply dropped (no extra LLM call). Only once the token estimate actually exceeds `max_context_tokens` are the evicted messages summarized into a `<context_summary>` block instead of dropped outright.
+   - The resulting effective context is written atomically to `<session-dir>/context.json` before the next LLM request. Resuming loads that blob directly.
 
 ---
 
 ## 7. Dual Logging & Auditing
 
-Every Litegent run produces two files in your configured `log_dir` (default: `./logs`):
+Every Litegent run produces a session directory containing two per-run log files plus durable context:
 
-### 1. `session_<timestamp>.log` (Human-Readable Transcript)
+```text
+<top_dir>/<session-id>/
+├── context.json
+├── logs/
+│   ├── session_<run-id>.log
+│   └── trace_<run-id>.jsonl
+└── spool/
+```
+
+`log_dir` and `spool_dir` are session-relative; defaults are `logs` and `spool`.
+
+### 1. `session_<run-id>.log` (Human-Readable Transcript)
 A readable, chronologically ordered narrative log showing:
-- Initial user prompt and system parameters.
-- Step-by-step LLM thoughts and decisions.
-- Tool invocations with formatted arguments.
-- Tool execution summaries and exit codes.
-- Final conclusions and outputs.
+- Session ID, run ID, resumed flag, model, endpoint, working directory, and the full system prompt/skills.
+- Every user input, every assistant response, and every tool call with full JSON arguments.
+- Every tool result, including the full raw output; when truncation occurred, also the exact model-visible content, omitted count, and spool path.
+- Context pruning counts and full summaries.
+- Turn and run boundaries, token usage, outcomes, and errors.
 
-### 2. `trace_<timestamp>.jsonl` (Machine-Readable JSON Lines)
-An append-only log capturing every raw event:
-- Exact JSON request payloads sent to the LLM (including all messages and tool definitions).
-- Exact JSON response payloads from the LLM (including token usage metrics).
-- Tool execution latency in milliseconds, exit codes, stdout, and stderr.
+### 2. `trace_<run-id>.jsonl` (Machine-Readable JSON Lines)
+An append-only log capturing the same flow as structured events:
+- `session_start`, `user_prompt`, `llm_request`, `llm_response`
+- `tool_call`, `tool_result` (full output plus model-visible content when different)
+- `context_truncation`, `context_pruning`, `context_summary`
+- `loop_guard_triggered`, `turn_finish`, `session_finish`, `run_finish`, `session_error`
+
+Every event carries `timestamp`, `event_type`, `turn`, `step`, and `data`.
 
 **Quick log analysis with `jq`**:
 ```bash
 # View all executed tool commands and exit codes
-cat logs/trace_*.jsonl | jq 'select(.event_type=="tool_result") | {tool: .data.tool_name, exit: .data.exit_code, latency: .data.latency_ms}'
+cat <session-dir>/logs/trace_*.jsonl | jq 'select(.event_type=="tool_result") | {turn, step, tool: .data.tool_name, exit: .data.exit_code, latency: .data.latency_ms}'
 
 # View token consumption per step
-cat logs/trace_*.jsonl | jq 'select(.event_type=="llm_response") | {step: .step, total: .data.total_tokens, prompt: .data.prompt_tokens, completion: .data.completion_tokens}'
+cat <session-dir>/logs/trace_*.jsonl | jq 'select(.event_type=="llm_response") | {turn, step, total: .data.total_tokens, prompt: .data.prompt_tokens, completion: .data.completion_tokens}'
+
+# Inspect context compaction
+cat <session-dir>/logs/trace_*.jsonl | jq 'select(.event_type=="context_pruning" or .event_type=="context_summary")'
 ```
 
-> In interactive mode, `session_finish` is recorded once per **turn** that completes successfully, not once per process — expect one such event per turn in `trace_*.jsonl`, not just one at the very end.
+> `session_finish` records a successful final answer per turn; `turn_finish` records every turn outcome, and `run_finish` records the process outcome.
+
+### 3. `context.json` (Durable Context)
+The single authoritative context blob. It contains the effective, post-compaction message list and a SHA-256 of that list. It is replaced atomically whenever context changes, including immediately after compaction, and is loaded on resume. Invalid or corrupt blobs are rejected rather than silently reset.
 
 ---
 
@@ -335,10 +422,10 @@ Check if `max_steps` was reached. In single-shot mode this exits the process wit
 Ensure your `OPENAI_API_KEY` environment variable is set (`export OPENAI_API_KEY="sk-..."`) or referenced correctly in `config.json`.
 
 ### Q: How can I see command outputs if they were truncated?
-Litegent prints the exact spool file path in the logs (e.g., `.tmp/tool_outputs/call_abc123.txt`). You can inspect this file directly with `less` or `cat`.
+Litegent prints the exact spool file path in the logs (e.g., `~/.litegent/brave-otter-runs/spool/output_call_abc123.txt`). You can inspect this file directly with `less` or `cat`.
 
 ### Q: Why isn't Litegent sandboxed to my project directory?
-By design. Litegent is meant to act like a trusted operator with full access to the box it runs on — useful for sysadmin, security-audit, and cross-repo tasks that a sandboxed tool couldn't do. If you want a narrower blast radius, run it as a dedicated low-privilege user or inside a container/VM you control, and write your system prompt (`-s`) to state the boundaries you want respected. Always review `session_<timestamp>.log` after a run.
+By design. Litegent is meant to act like a trusted operator with full access to the box it runs on — useful for sysadmin, security-audit, and cross-repo tasks that a sandboxed tool couldn't do. If you want a narrower blast radius, run it as a dedicated low-privilege user or inside a container/VM you control, and write your system prompt (`-s`) to state the boundaries you want respected. Always review `session_<run-id>.log` after a run.
 
 ### Q: Why did I see a `[LOOP DETECTED]` message in the output?
-Litegent noticed the same tool call (same name, same arguments) returning the same result several times in a row and injected a corrective note so the model tries a different approach instead of burning through `max_steps` repeating itself. Check `trace_<timestamp>.jsonl` for the `loop_guard_triggered` event to see exactly what was repeating.
+Litegent noticed the same tool call (same name, same arguments) returning the same result several times in a row and injected a corrective note so the model tries a different approach instead of burning through `max_steps` repeating itself. Check `trace_<run-id>.jsonl` for the `loop_guard_triggered` event to see exactly what was repeating.

@@ -51,7 +51,15 @@ The Litegent project deliverables comprise the Go module source code, configurat
 │   │   └── logging_test.go
 │   ├── llm/
 │   │   ├── client.go
+│   │   ├── hash.go
 │   │   └── client_test.go
+│   ├── session/
+│   │   ├── session.go
+│   │   ├── id.go
+│   │   ├── lock.go
+│   │   ├── context.go
+│   │   ├── words.go
+│   │   └── session_test.go
 │   ├── progress/
 │   │   ├── progress.go
 │   │   └── progress_test.go
@@ -96,14 +104,15 @@ Note: Go tests are colocated as `_test.go` files alongside the package they test
 | `go.mod` / `go.sum` | Module definition and dependency lockfile | `module litegent`; pins `github.com/bmatcuk/doublestar/v4` (JSON config parsing and CLI flag parsing use the standard library — no dependency needed) |
 | `internal/version/version.go` | Build version string and accessor | Exposes `const Version = "0.1.0"` (overridable via `-ldflags "-X litegent/internal/version.Version=..."`) |
 | `cmd/litegent/main.go` | CLI entry point: calls `cliapp.Run` and `os.Exit`s with its result | Contains no business logic beyond argument hand-off and exit code translation |
-| `internal/cliapp/cli.go` | Flag parsing (`-s`, `-p`, `-c`, `-k`, `-i`, `-v`, `--version`, `-h`) via stdlib `flag`, default `~/.litegent/` path resolution, file existence/permission checks, and the interactive-mode stdin loop | Validates file existence; falls back to `~/.litegent/system.md` and `~/.litegent/config.json` when flags are omitted; creates either default file when absent without overwriting; provides meaningful errors; returns accurate exit codes; `-i` reads repeated turns from stdin until `/exit`/`/quit`/EOF |
-| `internal/config/config.go` | Config struct definitions with env var interpolation, validation, and default-file generation | Parses JSON via `encoding/json`; handles `${ENV_VAR}` / `${ENV_VAR:-default}`; applies documented defaults; `DefaultJSON`/`EnsureDefaultConfig` create `~/.litegent/config.json` with an API-key placeholder when absent |
-| `internal/llm/client.go` | `net/http`-based OpenAI-compatible chat completions client | Handles tool calls, retries, exponential backoff, and structured error reporting |
-| `internal/ctxmgr/context.go` | Context management engine | Implements tool output truncation, disk spooling, sliding window, and summarization |
+| `internal/cliapp/cli.go` | Flag parsing (`-s`, `-p`, `-c`, `-k`, `-i`, `-r`, `--resume-last`, `-v`, `--version`, `-h`) via stdlib `flag`, bootstrap and `top_dir` path resolution, session create/resume orchestration, file checks, and the interactive-mode stdin loop | Uses `~/.litegent/config.json` only as the `-c`-omitted bootstrap; derives system/skills/session paths from `top_dir`; creates default files only for new sessions; hard-fails invalid resume; finalizes run records, logs, and context on every exit path; `-i` reads repeated turns from stdin until `/exit`/`/quit`/EOF |
+| `internal/config/config.go`, `internal/config/paths.go` | Config structs, env interpolation, path resolution, validation, and default-file generation | Parses JSON; handles `${ENV_VAR}` / `${ENV_VAR:-default}`; resolves `top_dir` (config-directory default when omitted) and `skills_dir`; validates session-relative `log_dir`/`spool_dir`; applies documented defaults; `DefaultJSON`/`EnsureDefaultConfig` create the bootstrap config with an API-key placeholder |
+| `internal/llm/client.go`, `internal/llm/hash.go` | `net/http`-based OpenAI-compatible chat completions client and message hashing | Handles tool calls, retries, exponential backoff, structured errors, and stable SHA-256 message hashing |
+| `internal/ctxmgr/context.go` | Context management engine | Implements configurable tool-output truncation/spooling, whole-unit sliding window, summarization, and `PrepareResult` metadata |
 | `internal/skills/skills.go` | Skill loader and prompt augmenter | Recursively scans `*.md` files, rejects reserved XML wrapper tags, escapes attributes, and injects an `<available_skills>` catalog |
-| `internal/logging/logging.go` | Dual logging engine | Simultaneously generates append-only JSONL event trace and formatted human transcript |
+| `internal/session/*.go` | Session identity, layout, locking, manifests, and context persistence | Generates unique 3/4-word IDs; creates/opens per-session directories; atomically persists validated `context.json`; records run/turn metadata; enforces one writer per session |
+| `internal/logging/logging.go` | Dual logging engine | Simultaneously generates append-only JSONL event trace and parseable human transcript, including full prompts, assistant output, tool arguments/results, truncation details, compaction events, and run boundaries; recursive secret redaction; synced writes |
 | `internal/progress/progress.go` | Live, human-facing progress reporter (`-v`) | Nil-receiver-safe `*Reporter`; streams startup/turn/request/tool-call/result/session lines to stderr with secrets masked; no-ops when disabled; in interactive (`-i`) sessions without `-v` it still emits one compact `\|ToolCall : ...` notice line per tool invocation (single-shot never does) |
-| `internal/agent/agent.go` | Core agentic execution loop | `Run` (single-shot) and `RunInteractive` (persistent multi-turn) both share a `runTurn` implementation; orchestrates LLM queries, tool executions, context updates, the loop guard, and the stop condition |
+| `internal/agent/agent.go` | Core agentic execution loop | `Run`/`RunWithHistory` and `RunInteractive`/`RunInteractiveWithHistory` share `runTurn`; orchestrates LLM queries, tool execution, context compaction and persistence, the loop guard, and stop conditions |
 | `internal/tools/registry.go` | Tool registry and OpenAI schema exporter | Registers all built-in tools and aggregates their JSON schemas |
 | `internal/tools/bash.go` | Linux shell execution tool | Executes commands with context-based timeout and stream capture; non-zero exit does not crash the agent |
 | `internal/tools/fileops.go` | File reading, writing, and surgical editing tools | Implements `read_file`, `write_file`, and `edit_file` with precise string matching |

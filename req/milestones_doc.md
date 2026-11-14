@@ -125,6 +125,19 @@ litegent [-s <file>] -i [-c <file>] [-k <dir>] [-v] [-r <session-id> | --resume-
 | 7 | Documentation and migration | 1–6 | Docs, examples, and migration notes match the implementation |
 | 8 | Final verification | 1–7 | Full automated and manual acceptance pass |
 
+### Delivery Status
+
+| Milestone | Status | Commit |
+|---|---|---|
+| 1. Configuration foundation | Complete | `056572a` |
+| 2. Session identity and storage | Complete | `ac95d5c` |
+| 3. Logging completeness | Complete | `6576066` |
+| 4. Durable context blob | Complete | `251aa4b` |
+| 5. Resume | Complete | `582d500` |
+| 6. Durability and failure hardening | Complete | `e5a9527` |
+| 7. Documentation and migration | Complete | docs commit |
+| 8. Final verification | Complete | verification commit |
+
 ---
 
 ## 4. Cross-Cutting Acceptance Criteria

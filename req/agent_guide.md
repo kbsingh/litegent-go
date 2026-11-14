@@ -43,7 +43,7 @@ When contributing to, implementing, or extending Litegent, all developers (both 
 ### 1.2 Engineering Quality, Security & Maintainability
 
 #### 1. Code Cleanliness & Idiomatic Standards
-- Write modern, idiomatic Go 1.22+ code: run `gofmt` (or `goimports`) on every file and keep `go vet ./...` clean.
+- Write modern, idiomatic Go 1.26.8+ code: run `gofmt` (or `goimports`) on every file and keep `go vet ./...` clean.
 - Favor Go's static type system and explicit error returns (`if err != nil { return fmt.Errorf("...: %w", err) }`) over hidden control flow; do not use panics for expected error conditions.
 - Ensure all exported packages, types, and functions carry a standard Go doc comment (starting with the identifier name) that explains *why* logic exists rather than stating the obvious.
 - Avoid unnecessary external dependencies: lean on Go's standard library (`net/http`, `encoding/json`, `os/exec`, `context`, `path/filepath`, `regexp`, `flag`, `bufio`, `log/slog`) complemented only by a small, well-justified set of third-party packages — currently just one: `github.com/bmatcuk/doublestar/v4` for recursive `**` glob matching (`path/filepath.Glob` has no recursive support). Configuration files are JSON only, parsed with the standard library `encoding/json`. CLI flag parsing uses the standard library `flag` package — register each short/long alias twice against the same backing field, since stdlib `flag` already treats `-x`/`--x` identically.
@@ -60,12 +60,13 @@ When contributing to, implementing, or extending Litegent, all developers (both 
   - `internal/skills/`: Only handles Markdown skill ingestion.
   - `internal/logging/`: Only handles the dual-mode, on-disk audit log (JSONL trace + human transcript).
   - `internal/progress/`: Only handles the live, human-facing stderr progress stream (`-v`) — a presentation concern, independent of and in addition to `internal/logging`'s on-disk audit trail. Never required for correctness: every method is nil-receiver-safe and a disabled `*Reporter` is a true no-op.
-  - `internal/llm/`: Only manages HTTP communication with the LLM provider; also owns the shared `Message`/`ToolCall` wire types used across packages.
+  - `internal/llm/`: Only manages HTTP communication with the LLM provider; also owns the shared `Message`/`ToolCall` wire types and message hashing.
+  - `internal/session/`: Only owns session identity, directory layout, locking, manifests, and durable context persistence.
   - `internal/tools/`: Individual tool implementations isolated from the agent runtime, each behind the shared `Tool` interface, sharing small helpers (`functionSchema`, `requireStringArg`, etc.) from `registry.go` to avoid repeating schema/validation boilerplate.
 
 #### 3. Operate Unconfined — Safety Through Auditability, Not Restriction
 - **No Sandbox, No Path Jail**: Litegent is intentionally unconfined. The agent and its tools operate with the full filesystem and process privileges of the invoking user across the entire host — not just the working directory. `read_file`, `write_file`, `edit_file`, `glob_search`, `grep_search`, and `bash` must never reject, rewrite, or refuse a path for being "outside the project."
-  - `spool_dir` and `log_dir` default to paths under the working directory (`.tmp/tool_outputs`, `./logs`) purely for tidy defaults — they are ordinary config values, not security boundaries, and are freely overridable to any path.
+  - `spool_dir` and `log_dir` are session-relative paths (defaults `spool` and `logs`) under `<top_dir>/<session-id>/`; they exist for tidy per-session storage, not as tool access boundaries.
   - Because there is no sandbox, the dual audit log (Section 4) is the real safety control: every tool call and its exact arguments and output must be captured so any action taken anywhere on the host is fully reconstructable after the fact.
 - **No Cleartext Secrets**: Never commit or log API keys or bearer tokens. All API keys in runtime logs and progress output must be masked as `<first 3 chars>...<last 4 chars>`, preserving the key's own stub prefix (e.g., `sk-...1234`, `r9_...7890`); keys of 7 characters or fewer must be masked entirely (`****`), since a 3+4 character reveal would expose the whole key.
 - **Safe, Non-Interactive Subprocess Execution**:
@@ -151,40 +152,52 @@ Both `Agent.Run` (single-shot) and `Agent.RunInteractive` (persistent multi-turn
 Context management is critical to prevent token exhaustion and context window overflow:
 
 ### 3.1 Tool Output Truncation
-- When tool returns exceed `max_tool_output_chars` (default: 4000 chars):
-  - Save the complete raw content into `<spool_dir>/output_<call_id>.txt` (default `spool_dir`: `.tmp/tool_outputs` inside the working directory — an ordinary default, not an access boundary; see Section 1.2.3).
-  - Return a spliced response containing: 60% head content, a truncation banner naming the omitted character count and the spool file path, then 30% tail content.
-  - Example banner:
-    ```
-    [TRUNCATED: 18,450 characters omitted. Full content saved to: .tmp/tool_outputs/output_call_98fbc1.txt. Use read_file to inspect specific lines if needed.]
-    ```
+- Truncation runs only when `manage_context && truncate_tool_outputs`; `max_tool_output_chars` defaults to 4000.
+- When a tool return is oversized:
+  - Save the complete output into `<session-dir>/<spool_dir>/output_<call_id>.txt` (default `spool/` inside the session).
+  - Return a spliced response with 60% head, a truncation banner naming the omitted count and spool path, and 30% tail.
+  - Log both the full raw output and the exact model-visible content.
 
 ### 3.2 Sliding Window Pruning
-- Retain the most recent `window_size` turns in active memory.
-- When message history exceeds this limit, extract older intermediate tool turns into an eviction buffer.
+- Retain the most recent whole units up to `window_size` **messages** (default 40).
+- An assistant tool-call message is always evicted together with its tool results; never split a pair.
+- Always retain at least the most recent unit, even if it alone exceeds the window.
 
 ### 3.3 Progressive Summarization — Gated on the Actual Token Budget
-- Summarization is **not** a standalone trigger on token count; it only happens as a consequence of a sliding-window eviction (3.2), and even then only when needed:
-  - If `max_context_tokens` is a positive value and the pre-eviction token estimate does **not** exceed it, the evicted turns are simply dropped — no LLM summarization call is made, avoiding an unnecessary round-trip on every window overflow.
-  - Otherwise (the estimate exceeds `max_context_tokens`, or `max_context_tokens` is non-positive/unset — treated as "no budget gate configured"), the evicted turns (plus any prior summary) are summarized via an LLM sub-call, and the result becomes the new `<context_summary>` message at `messages[2]` (between the first-turn anchor and active history).
-- This two-condition gate is deliberate: an earlier implementation summarized unconditionally on every overflow, leaving `max_context_tokens` effectively unused. Don't regress to that.
+- Summarization is **not** a standalone trigger; it only happens as a consequence of sliding-window eviction (3.2), and only when the pre-eviction token estimate exceeds `max_context_tokens` (default 32000).
+- Under budget, evicted messages are dropped without a summarization call.
+- When summarization runs, evicted messages plus any prior summary are condensed into `messages[2]`.
+- Don't regress to unconditional summarization.
+
+### 3.4 Durable Context Blob
+- The effective message list must be saved atomically to `<session-dir>/context.json` after user input, after compaction, after a complete tool step, and after a final answer.
+- Context must be validated before save and after load: system first, summary only at index 2, complete tool-call/result pairs.
+- Compaction must save the new context before the next request.
+- Resume must load and validate the blob; missing/corrupt blobs hard-fail.
 
 ---
 
 ## 4. Dual Logging Specifications
 
-Every session must generate two distinct log files under `log_dir` (e.g. `./logs`). Because Litegent is unconfined (no sandbox), this log is the real safety/accountability mechanism — see Section 1.2.3.
+Every run writes two distinct per-run log files under `<session-dir>/<log_dir>/` (default `logs/`). Because Litegent is unconfined (no sandbox), these logs are the real safety/accountability mechanism — see Section 1.2.3.
 
-### 4.1 JSONL Event Log (`trace_<timestamp>.jsonl`)
-- Contains machine-readable, append-only JSON objects, one per line.
-- The event types actually emitted by the current loop: `session_start`, `llm_request`, `llm_response`, `tool_call`, `tool_result`, `context_truncation` (only when truncation actually occurred), `loop_guard_triggered` (only when the guard actually fired), `session_finish` (once per successful turn — in interactive mode this means once per turn, not once per process), `session_error` (fatal error, interruption, or a turn exceeding `max_steps`).
-- Every event must include: `timestamp` (ISO 8601 UTC), `event_type`, `step` (int), and an event-specific `data` payload.
-- Sensitive API keys must be masked, not just omitted — redact the literal key text anywhere it could appear, not only in a dedicated field.
+### 4.1 JSONL Event Log (`trace_<run-id>.jsonl`)
+- Machine-readable, append-only JSON objects, one per line.
+- Events: `session_start`, `user_prompt`, `llm_request`, `llm_response`, `tool_call`, `tool_result`, `context_truncation`, `context_pruning`, `context_summary`, `loop_guard_triggered`, `turn_finish`, `session_finish`, `run_finish`, `session_error`.
+- Every event includes `timestamp`, `event_type`, `turn`, `step`, and an event-specific `data` payload.
+- `tool_result` carries the full raw output plus `model_content`/spool metadata when truncation or the loop guard changed what the model saw.
+- Sensitive API keys must be redacted recursively, including nested tool arguments and results.
 
-### 4.2 Human-Readable Session Log (`session_<timestamp>.log`)
-- Formatted with visual headers, timestamps, thoughts, tool commands, formatted outputs, and completion summaries.
-- Tool-call argument order must be deterministic (sort keys before formatting) so the same call always renders identically across runs — Go map iteration order is otherwise randomized.
-- Readable by humans in any standard pager (`less`, `cat`, editor) without parsing JSON.
+### 4.2 Human-Readable Session Log (`session_<run-id>.log`)
+- Stable, parseable headers and delimiters for every turn, step, assistant response, tool call, tool result, compaction event, and run boundary.
+- Full system prompt/skills, user inputs, assistant content, full tool arguments, full raw tool output, exact model-visible content when truncated, summaries, and errors.
+- Tool-call argument order must be deterministic (JSON) so the same call renders identically across runs.
+- Readable in any standard pager (`less`, `cat`, editor) without parsing JSON.
+
+### 4.3 Durable Context (`context.json`)
+- One authoritative blob per session, updated atomically whenever the effective context changes.
+- Must be validated and hash-checked; compaction must persist the new list before the next request.
+- Resume loads this blob instead of reconstructing history from logs.
 
 ### 4.3 Live Progress (`-v`, distinct from the files above)
 - `internal/progress.Reporter` streams concise lines to stderr as the loop runs — a presentation convenience, not part of the audit trail. It must never be the only record of what happened; the dual log above is always written regardless of `-v`.
