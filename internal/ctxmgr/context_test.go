@@ -61,12 +61,15 @@ func TestPrepare_NoOpBelowWindowSize(t *testing.T) {
 		{Role: llm.RoleUser, Content: "task"},
 		{Role: llm.RoleTool, Content: "result1"},
 	}
-	out, err := m.Prepare(context.Background(), messages)
+	res, err := m.Prepare(context.Background(), messages)
 	if err != nil {
 		t.Fatalf("Prepare returned error: %v", err)
 	}
-	if len(out) != len(messages) {
-		t.Errorf("expected no pruning below window size, got %d messages", len(out))
+	if len(res.Messages) != len(messages) {
+		t.Errorf("expected no pruning below window size, got %d messages", len(res.Messages))
+	}
+	if res.Evicted != 0 || res.Summarized {
+		t.Errorf("unexpected pruning result: %+v", res)
 	}
 }
 
@@ -80,15 +83,15 @@ func TestPrepare_NeverEvictsSystemOrUserPrompt(t *testing.T) {
 		messages = append(messages, llm.Message{Role: llm.RoleTool, Content: "turn"})
 	}
 
-	out, err := m.Prepare(context.Background(), messages)
+	res, err := m.Prepare(context.Background(), messages)
 	if err != nil {
 		t.Fatalf("Prepare returned error: %v", err)
 	}
-	if out[0].Role != llm.RoleSystem || out[0].Content != "sys" {
-		t.Fatalf("system prompt was evicted or modified: %+v", out[0])
+	if res.Messages[0].Role != llm.RoleSystem || res.Messages[0].Content != "sys" {
+		t.Fatalf("system prompt was evicted or modified: %+v", res.Messages[0])
 	}
-	if out[1].Role != llm.RoleUser || out[1].Content != "task" {
-		t.Fatalf("user prompt was evicted or modified: %+v", out[1])
+	if res.Messages[1].Role != llm.RoleUser || res.Messages[1].Content != "task" {
+		t.Fatalf("user prompt was evicted or modified: %+v", res.Messages[1])
 	}
 }
 
@@ -102,17 +105,20 @@ func TestPrepare_SlidingWindowPrunesOldestTurns(t *testing.T) {
 		messages = append(messages, llm.Message{Role: llm.RoleTool, Content: strconv.Itoa(i)})
 	}
 
-	out, err := m.Prepare(context.Background(), messages)
+	res, err := m.Prepare(context.Background(), messages)
 	if err != nil {
 		t.Fatalf("Prepare returned error: %v", err)
 	}
-	active := out[2:]
+	active := res.Messages[2:]
 	if len(active) != 3 {
 		t.Fatalf("expected window size of 3 active turns, got %d: %+v", len(active), active)
 	}
 	// The 3 most recent turns (3, 4, 5) must be the ones kept.
 	if active[0].Content != "3" || active[2].Content != "5" {
 		t.Errorf("expected oldest turns evicted, kept turns: %+v", active)
+	}
+	if res.Evicted != 2 || res.Summarized {
+		t.Errorf("pruning metadata = %+v, want Evicted=2 and no summary", res)
 	}
 }
 
@@ -139,15 +145,18 @@ func TestPrepare_SummarizesEvictedTurns(t *testing.T) {
 		{Role: llm.RoleTool, Content: "recent2"},
 	}
 
-	out, err := m.Prepare(context.Background(), messages)
+	res, err := m.Prepare(context.Background(), messages)
 	if err != nil {
 		t.Fatalf("Prepare returned error: %v", err)
 	}
 	if !fs.called {
 		t.Fatal("expected summarizer to be called when window size is exceeded")
 	}
-	if out[2].Role != llm.RoleSummary || out[2].Content != "summary text" {
-		t.Fatalf("expected <context_summary> at index 2, got: %+v", out[2])
+	if res.Messages[2].Role != llm.RoleSummary || res.Messages[2].Content != "summary text" {
+		t.Fatalf("expected <context_summary> at index 2, got: %+v", res.Messages[2])
+	}
+	if !res.Summarized || res.Summary != "summary text" || res.Evicted != 2 {
+		t.Errorf("summary metadata = %+v", res)
 	}
 }
 
@@ -166,7 +175,7 @@ func TestPrepare_DoesNotSummarizeUnderTokenBudget(t *testing.T) {
 		{Role: llm.RoleTool, Content: "recent2"},
 	}
 
-	out, err := m.Prepare(context.Background(), messages)
+	res, err := m.Prepare(context.Background(), messages)
 	if err != nil {
 		t.Fatalf("Prepare returned error: %v", err)
 	}
@@ -175,11 +184,14 @@ func TestPrepare_DoesNotSummarizeUnderTokenBudget(t *testing.T) {
 	}
 	// Evicted turns should simply be dropped: system, user, then the 2
 	// most recent turns, no <context_summary> message in between.
-	if len(out) != 4 {
-		t.Fatalf("expected 4 messages (system, user, 2 kept turns), got %d: %+v", len(out), out)
+	if len(res.Messages) != 4 {
+		t.Fatalf("expected 4 messages (system, user, 2 kept turns), got %d: %+v", len(res.Messages), res.Messages)
 	}
-	if out[2].Role == llm.RoleSummary {
+	if res.Messages[2].Role == llm.RoleSummary {
 		t.Error("did not expect a <context_summary> message when under budget")
+	}
+	if res.Summarized || res.Evicted != 2 {
+		t.Errorf("expected eviction without summary, got %+v", res)
 	}
 }
 

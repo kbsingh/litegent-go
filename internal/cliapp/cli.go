@@ -349,7 +349,8 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if err := logger.LogSessionStart(sess.ID, cfg.Model, cfg.BaseURL); err != nil && args.verbose {
+	workDir, _ := os.Getwd()
+	if err := logger.LogSessionStart(sess.ID, sess.RunID, false, cfg.Model, cfg.BaseURL, workDir, systemPrompt); err != nil && args.verbose {
 		fmt.Fprintf(stderr, "litegent: warning: failed to write session start: %v\n", err)
 	}
 	prog.Startup(cfg.Model, cfg.BaseURL, len(registry.Schemas()), args.interactive)
@@ -358,27 +359,29 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	if args.interactive {
-		return runInteractive(ctx, ag, systemPrompt, cfg, prog, stdin, stdout, stderr)
+		return runInteractive(ctx, ag, systemPrompt, cfg, prog, logger, stdin, stdout, stderr)
 	}
 
 	result := ag.Run(ctx, systemPrompt, string(promptBytes))
 	prog.SessionEnd(result.Outcome.String(), 1)
 
+	exitCode := ExitSuccess
 	switch result.Outcome {
 	case agent.OutcomeSuccess:
 		fmt.Fprintln(stdout, result.FinalMessage)
 		fmt.Fprintln(stdout, turnSeparator)
-		return ExitSuccess
 	case agent.OutcomeMaxStepsExceeded:
 		fmt.Fprintf(stderr, "litegent: max_steps (%d) exceeded without a final response\n", cfg.MaxSteps)
-		return ExitMaxStepsExceeded
+		exitCode = ExitMaxStepsExceeded
 	case agent.OutcomeInterrupted:
 		fmt.Fprintln(stderr, "litegent: interrupted")
-		return ExitInterrupted
+		exitCode = ExitInterrupted
 	default: // agent.OutcomeLLMError and any unforeseen outcome
 		fmt.Fprintf(stderr, "litegent: fatal LLM error: %v\n", result.Err)
-		return ExitLLMAPIError
+		exitCode = ExitLLMAPIError
 	}
+	_ = logger.LogRunEnd(result.Outcome.String(), exitCode, result.Steps, result.TotalTokens)
+	return exitCode
 }
 
 // runInteractive drives a persistent, multi-turn session: it reads one
@@ -387,7 +390,7 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // and prints each turn's final response to stdout as it completes.
 // Conversation history persists across turns via agent.Agent.RunInteractive;
 // each turn gets its own independent max_steps budget.
-func runInteractive(ctx context.Context, ag *agent.Agent, systemPrompt string, cfg config.LitegentConfig, prog *progress.Reporter, stdin io.Reader, stdout, stderr io.Writer) int {
+func runInteractive(ctx context.Context, ag *agent.Agent, systemPrompt string, cfg config.LitegentConfig, prog *progress.Reporter, logger *logging.Logger, stdin io.Reader, stdout, stderr io.Writer) int {
 	reader := bufio.NewReader(stdin)
 
 	readPrompt := func() (string, bool) {
@@ -445,14 +448,17 @@ func runInteractive(ctx context.Context, ag *agent.Agent, systemPrompt string, c
 	result := ag.RunInteractive(ctx, systemPrompt, readPrompt, onTurnResult)
 	prog.SessionEnd(result.Outcome.String(), result.Steps)
 
+	exitCode := ExitSuccess
 	switch result.Outcome {
 	case agent.OutcomeInterrupted:
-		return ExitInterrupted
+		exitCode = ExitInterrupted
 	case agent.OutcomeLLMError:
-		return ExitLLMAPIError
+		exitCode = ExitLLMAPIError
 	default: // a session that ends via EOF/"/exit" or after a recoverable max_steps turn is a clean exit
-		return ExitSuccess
+		exitCode = ExitSuccess
 	}
+	_ = logger.LogRunEnd(result.Outcome.String(), exitCode, result.Steps, result.TotalTokens)
+	return exitCode
 }
 
 // buildRegistry registers the enabled built-in tools per cfg.Tools. All

@@ -104,6 +104,7 @@ func (a *Agent) Run(ctx context.Context, systemPrompt, userPrompt string) Result
 		{Role: llm.RoleSystem, Content: systemPrompt},
 		{Role: llm.RoleUser, Content: userPrompt},
 	}
+	_ = a.Logger.LogUserPrompt(1, userPrompt)
 	_, result := a.runTurn(ctx, messages, 1)
 	return result
 }
@@ -128,23 +129,30 @@ func (a *Agent) RunInteractive(
 	messages := []llm.Message{{Role: llm.RoleSystem, Content: systemPrompt}}
 
 	turn := 0
+	totalSteps := 0
+	totalTokens := 0
 	for {
 		if err := ctx.Err(); err != nil {
-			return Result{Outcome: OutcomeInterrupted, Steps: turn, Err: err}
+			return Result{Outcome: OutcomeInterrupted, Steps: totalSteps, TotalTokens: totalTokens, Err: err}
 		}
 
 		prompt, ok := readPrompt()
 		if !ok {
-			return Result{Outcome: OutcomeSuccess, Steps: turn}
+			return Result{Outcome: OutcomeSuccess, Steps: totalSteps, TotalTokens: totalTokens}
 		}
 		turn++
+		_ = a.Logger.LogUserPrompt(turn, prompt)
 
 		messages = append(messages, llm.Message{Role: llm.RoleUser, Content: prompt})
 
 		var result Result
 		messages, result = a.runTurn(ctx, messages, turn)
+		totalSteps += result.Steps
+		totalTokens += result.TotalTokens
 
 		if !onTurnResult(turn, result) {
+			result.Steps = totalSteps
+			result.TotalTokens = totalTokens
 			return result
 		}
 	}
@@ -167,7 +175,8 @@ func (a *Agent) runTurn(ctx context.Context, messages []llm.Message, turn int) (
 	step := 0
 	for ; step < a.Config.MaxSteps; step++ {
 		if err := ctx.Err(); err != nil {
-			a.Logger.LogSessionError(step, "interrupted: "+err.Error())
+			_ = a.Logger.LogSessionError(turn, step, "interrupted: "+err.Error())
+			_ = a.Logger.LogTurnEnd(turn, OutcomeInterrupted.String(), step, totalTokens)
 			return messages, Result{Outcome: OutcomeInterrupted, Steps: step, TotalTokens: totalTokens, Err: err}
 		}
 
@@ -175,35 +184,45 @@ func (a *Agent) runTurn(ctx context.Context, messages []llm.Message, turn int) (
 			before := len(messages)
 			prepared, err := a.Context.Prepare(ctx, messages)
 			if err != nil {
-				a.Logger.LogSessionError(step, fmt.Sprintf("context preparation failed: %v", err))
+				_ = a.Logger.LogSessionError(turn, step, fmt.Sprintf("context preparation failed: %v", err))
+				_ = a.Logger.LogTurnEnd(turn, OutcomeLLMError.String(), step, totalTokens)
 				return messages, Result{Outcome: OutcomeLLMError, Steps: step, TotalTokens: totalTokens, Err: err}
 			}
-			messages = prepared
+			messages = prepared.Messages
+			if prepared.Evicted > 0 {
+				_ = a.Logger.LogContextPruning(turn, step, before, len(messages), prepared.Evicted)
+			}
+			if prepared.Summarized {
+				_ = a.Logger.LogContextSummary(turn, step, prepared.Summary)
+			}
 			a.Progress.ContextPruned(step, before, len(messages))
 		}
 
-		a.Logger.LogLLMRequest(step, ctxmgr.EstimateTokens(messages))
+		_ = a.Logger.LogLLMRequest(turn, step, len(messages), ctxmgr.EstimateTokens(messages), "")
 		reqStarted := a.Progress.Request(step, len(messages), len(a.Tools.Schemas()))
 		resp, err := a.LLM.ChatCompletion(ctx, messages, a.Tools.Schemas())
 		if err != nil {
-			a.Logger.LogSessionError(step, fmt.Sprintf("LLM request failed: %v", err))
+			_ = a.Logger.LogSessionError(turn, step, fmt.Sprintf("LLM request failed: %v", err))
+			_ = a.Logger.LogTurnEnd(turn, OutcomeLLMError.String(), step, totalTokens)
 			return messages, Result{Outcome: OutcomeLLMError, Steps: step, TotalTokens: totalTokens, Err: err}
 		}
 		if len(resp.Choices) == 0 {
-			a.Logger.LogSessionError(step, "LLM response contained no choices")
+			_ = a.Logger.LogSessionError(turn, step, "LLM response contained no choices")
+			_ = a.Logger.LogTurnEnd(turn, OutcomeLLMError.String(), step, totalTokens)
 			return messages, Result{Outcome: OutcomeLLMError, Steps: step, TotalTokens: totalTokens, Err: fmt.Errorf("empty choices in LLM response")}
 		}
 
 		choice := resp.Choices[0]
 		totalTokens += resp.Usage.TotalTokens
-		a.Logger.LogLLMResponse(step, choice.Message.Content, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens)
+		_ = a.Logger.LogLLMResponse(turn, step, choice.Message.Content, choice.Message.ToolCalls, resp.Usage)
 		a.Progress.Response(step, reqStarted, len(choice.Message.ToolCalls), resp.Usage.TotalTokens)
 
 		if len(choice.Message.ToolCalls) == 0 {
 			// Preserve the assistant's final answer in history: in a
 			// multi-turn session the next turn must still see it.
 			messages = append(messages, choice.Message)
-			a.Logger.LogFinish(step, choice.Message.Content, step+1, totalTokens)
+			_ = a.Logger.LogFinish(turn, step, choice.Message.Content, step+1, totalTokens)
+			_ = a.Logger.LogTurnEnd(turn, OutcomeSuccess.String(), step+1, totalTokens)
 			a.Progress.TurnEnd(turn, OutcomeSuccess.String(), step+1)
 			return messages, Result{Outcome: OutcomeSuccess, FinalMessage: choice.Message.Content, Steps: step + 1, TotalTokens: totalTokens}
 		}
@@ -211,12 +230,13 @@ func (a *Agent) runTurn(ctx context.Context, messages []llm.Message, turn int) (
 		messages = append(messages, choice.Message)
 
 		for _, call := range choice.Message.ToolCalls {
-			toolMsg := a.dispatchToolCall(ctx, step, call)
+			toolMsg := a.dispatchToolCall(ctx, turn, step, call)
 			messages = append(messages, toolMsg)
 		}
 	}
 
-	a.Logger.LogSessionError(step, fmt.Sprintf("max_steps (%d) exceeded without a final response", a.Config.MaxSteps))
+	_ = a.Logger.LogSessionError(turn, step, fmt.Sprintf("max_steps (%d) exceeded without a final response", a.Config.MaxSteps))
+	_ = a.Logger.LogTurnEnd(turn, OutcomeMaxStepsExceeded.String(), step, totalTokens)
 	a.Progress.TurnEnd(turn, OutcomeMaxStepsExceeded.String(), step)
 	return messages, Result{Outcome: OutcomeMaxStepsExceeded, Steps: step, TotalTokens: totalTokens}
 }
@@ -224,7 +244,7 @@ func (a *Agent) runTurn(ctx context.Context, messages []llm.Message, turn int) (
 // dispatchToolCall executes a single tool call, applies the loop guard
 // and context truncation, logs the result, and returns the tool-role
 // message to append to the conversation.
-func (a *Agent) dispatchToolCall(ctx context.Context, step int, call llm.ToolCall) llm.Message {
+func (a *Agent) dispatchToolCall(ctx context.Context, turn, step int, call llm.ToolCall) llm.Message {
 	var args map[string]any
 	if call.Function.Arguments != "" {
 		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
@@ -232,7 +252,7 @@ func (a *Agent) dispatchToolCall(ctx context.Context, step int, call llm.ToolCal
 		}
 	}
 
-	a.Logger.LogToolCall(step, call.ID, call.Function.Name, args)
+	_ = a.Logger.LogToolCall(turn, step, call.ID, call.Function.Name, args)
 	toolStarted := a.Progress.ToolCall(step, call.Function.Name, args)
 
 	start := time.Now()
@@ -257,20 +277,26 @@ func (a *Agent) dispatchToolCall(ctx context.Context, step int, call llm.ToolCal
 	}
 	a.lastSignature = &sig
 
+	loopGuard := false
 	if a.Config.MaxRepeatedToolCalls > 0 && a.repeatCount > a.Config.MaxRepeatedToolCalls {
-		a.Logger.LogLoopGuardTriggered(step, call.Function.Name, args, a.repeatCount)
+		loopGuard = true
+		_ = a.Logger.LogLoopGuardTriggered(turn, step, call.Function.Name, args, a.repeatCount)
 		output = fmt.Sprintf(
 			"[LOOP DETECTED] This exact call already produced this result %d times in a row. Try a different approach instead of repeating it.\n\n%s",
 			a.repeatCount, resultJSON,
 		)
 	}
 
+	var truncation *ctxmgr.TruncationInfo
 	if a.Config.ManageContext && a.Config.ContextConfig.TruncateToolOutputs {
 		truncated, info, terr := a.Context.TruncateToolOutput(call.ID, output)
-		if terr == nil {
+		if terr != nil {
+			_ = a.Logger.LogSessionError(turn, step, fmt.Sprintf("tool output truncation failed: %v", terr))
+		} else {
 			output = truncated
+			truncation = info
 			if info != nil {
-				a.Logger.LogContextTruncation(step, call.ID, info.SpoolFile, info.OmittedChars)
+				_ = a.Logger.LogContextTruncation(turn, step, call.ID, info.SpoolFile, info.OmittedChars)
 			}
 		}
 	}
@@ -281,12 +307,22 @@ func (a *Agent) dispatchToolCall(ctx context.Context, step int, call llm.ToolCal
 	} else if !result.Success {
 		exitCode = 1
 	}
-	summary := result.Output
-	const summaryLimit = 500
-	if len(summary) > summaryLimit {
-		summary = summary[:summaryLimit] + "... (see trace log for full output)"
+
+	modelVisible := ""
+	if loopGuard || truncation != nil {
+		modelVisible = output
 	}
-	a.Logger.LogToolResult(step, call.ID, call.Function.Name, result.Success, exitCode, summary, latencyMs)
+	spoolFile := ""
+	omittedChars := 0
+	if truncation != nil {
+		spoolFile = truncation.SpoolFile
+		omittedChars = truncation.OmittedChars
+	}
+	_ = a.Logger.LogToolResult(
+		turn, step, call.ID, call.Function.Name,
+		result.Success, exitCode, result.Output, modelVisible,
+		spoolFile, omittedChars, latencyMs,
+	)
 
 	return llm.Message{Role: llm.RoleTool, ToolCallID: call.ID, Content: output}
 }

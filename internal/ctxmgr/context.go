@@ -99,13 +99,21 @@ const (
 	anchorLen  = 2 // system + user are always present once the loop starts
 )
 
+// PrepareResult describes the outcome of one context-preparation pass.
+type PrepareResult struct {
+	Messages   []llm.Message
+	Evicted    int
+	Summarized bool
+	Summary    string
+}
+
 // Prepare runs Stage 2 (sliding window pruning) and, when a summarizer is
 // configured and the token budget is exceeded, Stage 3 (summarization).
 // The system prompt (index 0) and initial user prompt (index 1) are never
 // evicted.
-func (m *Manager) Prepare(ctx context.Context, messages []llm.Message) ([]llm.Message, error) {
+func (m *Manager) Prepare(ctx context.Context, messages []llm.Message) (PrepareResult, error) {
 	if len(messages) <= anchorLen {
-		return messages, nil
+		return PrepareResult{Messages: messages}, nil
 	}
 
 	hasSummary := len(messages) > idxSummary && messages[idxSummary].Role == llm.RoleSummary
@@ -117,9 +125,13 @@ func (m *Manager) Prepare(ctx context.Context, messages []llm.Message) ([]llm.Me
 		summary = &s
 	}
 	active := messages[activeStart:]
+	evictedTotal := 0
+	summarized := false
+	summaryText := ""
 
 	if m.cfg.WindowSize > 0 && len(active) > m.cfg.WindowSize {
 		evictedCount := len(active) - m.cfg.WindowSize
+		evictedTotal = evictedCount
 		evicted := active[:evictedCount]
 		kept := active[evictedCount:]
 
@@ -139,9 +151,11 @@ func (m *Manager) Prepare(ctx context.Context, messages []llm.Message) ([]llm.Me
 			}
 			text, err := m.summarizer.Summarize(ctx, toSummarize)
 			if err != nil {
-				return nil, fmt.Errorf("summarizing evicted context: %w", err)
+				return PrepareResult{}, fmt.Errorf("summarizing evicted context: %w", err)
 			}
 			summary = &llm.Message{Role: llm.RoleSummary, Content: text}
+			summarized = true
+			summaryText = text
 		}
 		active = kept
 	}
@@ -152,7 +166,12 @@ func (m *Manager) Prepare(ctx context.Context, messages []llm.Message) ([]llm.Me
 		result = append(result, *summary)
 	}
 	result = append(result, active...)
-	return result, nil
+	return PrepareResult{
+		Messages:   result,
+		Evicted:    evictedTotal,
+		Summarized: summarized,
+		Summary:    summaryText,
+	}, nil
 }
 
 // EstimateTokens is a lightweight, dependency-free token estimate (~4

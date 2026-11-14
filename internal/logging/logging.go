@@ -11,16 +11,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"litegent/internal/llm"
 )
 
-// Event type constants, per req/requirements_doc.md FR-6.2.
+// Event type constants.
 const (
 	EventSessionStart       = "session_start"
+	EventUserPrompt         = "user_prompt"
 	EventLLMRequest         = "llm_request"
 	EventLLMResponse        = "llm_response"
 	EventToolCall           = "tool_call"
@@ -29,14 +31,19 @@ const (
 	EventContextPruning     = "context_pruning"
 	EventContextSummary     = "context_summary"
 	EventLoopGuardTriggered = "loop_guard_triggered"
+	EventTurnFinish         = "turn_finish"
 	EventSessionFinish      = "session_finish"
+	EventRunFinish          = "run_finish"
 	EventSessionError       = "session_error"
 )
 
-// TraceEvent is a single line written to trace_<timestamp>.jsonl.
+const divider = "--------------------------------------------------------------------------------"
+
+// TraceEvent is a single line written to trace_<run-id>.jsonl.
 type TraceEvent struct {
 	Timestamp string         `json:"timestamp"`
 	EventType string         `json:"event_type"`
+	Turn      int            `json:"turn"`
 	Step      int            `json:"step"`
 	Data      map[string]any `json:"data"`
 }
@@ -46,7 +53,7 @@ type Logger struct {
 	mu          sync.Mutex
 	traceFile   *os.File
 	sessionFile *os.File
-	apiKey      string // redacted from every logged string; never empty-checked against ""
+	apiKey      string // redacted from every logged string
 
 	RunID       string
 	TracePath   string
@@ -102,24 +109,44 @@ func newRunID() string {
 	)
 }
 
-// Close flushes and closes both log files.
+// Sync flushes both log files to stable storage.
+func (l *Logger) Sync() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var first error
+	for _, f := range []*os.File{l.traceFile, l.sessionFile} {
+		if f == nil {
+			continue
+		}
+		if err := f.Sync(); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
+// Close syncs and closes both log files.
 func (l *Logger) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	err1 := l.traceFile.Close()
-	err2 := l.sessionFile.Close()
-	if err1 != nil {
-		return err1
+	var first error
+	for _, f := range []*os.File{l.traceFile, l.sessionFile} {
+		if f == nil {
+			continue
+		}
+		if err := f.Sync(); err != nil && first == nil {
+			first = err
+		}
+		if err := f.Close(); err != nil && first == nil {
+			first = err
+		}
 	}
-	return err2
+	return first
 }
 
 func nowUTC() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
-// redact masks any occurrence of the configured API key in s. The mask
-// preserves the key's own stub prefix (e.g. "sk-...", "r9_..."); keys of
-// 7 characters or fewer are masked entirely, since revealing a 3+4
-// character prefix/suffix would expose the whole key.
+// redact masks any occurrence of the configured API key in s.
 func (l *Logger) redact(s string) string {
 	if l.apiKey == "" || !strings.Contains(s, l.apiKey) {
 		return s
@@ -131,21 +158,42 @@ func (l *Logger) redact(s string) string {
 	return strings.ReplaceAll(s, l.apiKey, masked)
 }
 
+// redactValue recursively masks strings inside maps and slices. Tool
+// arguments are nested structures, so top-level-only redaction would leak
+// secrets embedded in command arguments.
 func (l *Logger) redactValue(v any) any {
-	switch s := v.(type) {
+	switch x := v.(type) {
 	case string:
-		return l.redact(s)
+		return l.redact(x)
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, val := range x {
+			out[k] = l.redactValue(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, val := range x {
+			out[i] = l.redactValue(val)
+		}
+		return out
+	case []string:
+		out := make([]string, len(x))
+		for i, val := range x {
+			out[i] = l.redact(val)
+		}
+		return out
 	default:
 		return v
 	}
 }
 
-func (l *Logger) logTrace(eventType string, step int, data map[string]any) error {
+func (l *Logger) logTrace(turn int, eventType string, step int, data map[string]any) error {
 	redacted := make(map[string]any, len(data))
 	for k, v := range data {
 		redacted[k] = l.redactValue(v)
 	}
-	ev := TraceEvent{Timestamp: nowUTC(), EventType: eventType, Step: step, Data: redacted}
+	ev := TraceEvent{Timestamp: nowUTC(), EventType: eventType, Turn: turn, Step: step, Data: redacted}
 	b, err := json.Marshal(ev)
 	if err != nil {
 		return fmt.Errorf("marshaling trace event: %w", err)
@@ -164,125 +212,264 @@ func (l *Logger) writeSession(s string) error {
 	return err
 }
 
-// LogSessionStart records the session header in both logs.
-func (l *Logger) LogSessionStart(sessionID, model, baseURL string) error {
-	if err := l.logTrace(EventSessionStart, 0, map[string]any{
-		"session_id": sessionID, "model": model, "base_url": baseURL,
+// writeBlock writes a timestamped header followed by a fixed-delimiter
+// content block. The stable structure keeps the human log readable and
+// parseable.
+func (l *Logger) writeBlock(header, content string) error {
+	if content == "" {
+		content = "(empty)"
+	}
+	return l.writeSession(fmt.Sprintf("[%s] %s\n%s\n%s\n%s\n", nowUTC(), header, divider, content, divider))
+}
+
+func (l *Logger) writeJSONBlock(header string, v any) error {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		data = []byte(fmt.Sprint(v))
+	}
+	return l.writeBlock(header, string(data))
+}
+
+// LogSessionStart records the session header, full system prompt, and run
+// metadata in both logs.
+func (l *Logger) LogSessionStart(sessionID, runID string, resumed bool, model, baseURL, workDir, systemPrompt string) error {
+	if err := l.logTrace(0, EventSessionStart, 0, map[string]any{
+		"session_id":    sessionID,
+		"run_id":        runID,
+		"resumed":       resumed,
+		"model":         model,
+		"base_url":      baseURL,
+		"work_dir":      workDir,
+		"system_prompt": systemPrompt,
 	}); err != nil {
 		return err
 	}
+
 	header := fmt.Sprintf(
-		"%s\nLitegent Session: %s\nStarted: %s\nModel: %s\nBase URL: %s\n%s\n",
-		strings.Repeat("=", 80), sessionID, nowUTC(), model, baseURL, strings.Repeat("=", 80),
+		"%s\nLitegent Session: %s\nRun: %s\nResumed: %t\nStarted: %s\nModel: %s\nBase URL: %s\nWorking Dir: %s\n%s\n",
+		strings.Repeat("=", 80), sessionID, runID, resumed, nowUTC(), model, baseURL, workDir, strings.Repeat("=", 80),
 	)
-	return l.writeSession(header)
-}
-
-// LogLLMRequest records that the agent is about to call the LLM.
-func (l *Logger) LogLLMRequest(step, tokenEstimate int) error {
-	if err := l.logTrace(EventLLMRequest, step, map[string]any{"token_estimate": tokenEstimate}); err != nil {
+	if err := l.writeSession(header); err != nil {
 		return err
 	}
-	return l.writeSession(fmt.Sprintf("[%s] STEP %d | LLM Request (tokens: ~%d)\n", nowUTC(), step, tokenEstimate))
+	return l.writeBlock("SYSTEM PROMPT", systemPrompt)
 }
 
-// LogLLMResponse records the model's reply, including its "thought"
-// (the natural-language content accompanying/standing in for tool calls)
-// and token usage.
-func (l *Logger) LogLLMResponse(step int, thought string, promptTokens, completionTokens, totalTokens int) error {
-	if err := l.logTrace(EventLLMResponse, step, map[string]any{
-		"thought":           thought,
-		"prompt_tokens":     promptTokens,
-		"completion_tokens": completionTokens,
-		"total_tokens":      totalTokens,
-	}); err != nil {
+// LogUserPrompt records the exact user input for a turn.
+func (l *Logger) LogUserPrompt(turn int, prompt string) error {
+	if err := l.logTrace(turn, EventUserPrompt, 0, map[string]any{"prompt": prompt}); err != nil {
 		return err
 	}
-	if thought == "" {
-		return nil
+	return l.writeBlock(fmt.Sprintf("TURN %d | USER INPUT", turn), prompt)
+}
+
+// LogLLMRequest records the effective request shape before the call.
+func (l *Logger) LogLLMRequest(turn, step, messageCount, tokenEstimate int, contextSHA string) error {
+	data := map[string]any{
+		"message_count":  messageCount,
+		"token_estimate": tokenEstimate,
 	}
-	return l.writeSession(fmt.Sprintf("[%s] STEP %d | LLM Thought:\n%s\n", nowUTC(), step, thought))
+	if contextSHA != "" {
+		data["context_sha256"] = contextSHA
+	}
+	if err := l.logTrace(turn, EventLLMRequest, step, data); err != nil {
+		return err
+	}
+	line := fmt.Sprintf("[%s] TURN %d STEP %d | LLM REQUEST | messages=%d tokens~=%d",
+		nowUTC(), turn, step, messageCount, tokenEstimate)
+	if contextSHA != "" {
+		line += " context=sha256:" + contextSHA
+	}
+	return l.writeSession(line + "\n")
+}
+
+// LogLLMResponse records the assistant content and token usage. Tool calls
+// are recorded separately by LogToolCall so execution can be correlated.
+func (l *Logger) LogLLMResponse(turn, step int, content string, toolCalls []llm.ToolCall, usage llm.Usage) error {
+	data := map[string]any{
+		"thought":           content,
+		"prompt_tokens":     usage.PromptTokens,
+		"completion_tokens": usage.CompletionTokens,
+		"total_tokens":      usage.TotalTokens,
+	}
+	if len(toolCalls) > 0 {
+		calls := make([]map[string]any, 0, len(toolCalls))
+		for _, tc := range toolCalls {
+			calls = append(calls, map[string]any{
+				"id":        tc.ID,
+				"type":      tc.Type,
+				"name":      tc.Function.Name,
+				"arguments": tc.Function.Arguments,
+			})
+		}
+		data["tool_calls"] = calls
+	}
+	if err := l.logTrace(turn, EventLLMResponse, step, data); err != nil {
+		return err
+	}
+	if content == "" {
+		content = "(no content)"
+	}
+	return l.writeBlock(fmt.Sprintf("TURN %d STEP %d | ASSISTANT", turn, step), content)
 }
 
 // LogToolCall records a tool invocation before it executes.
-func (l *Logger) LogToolCall(step int, callID, name string, args map[string]any) error {
-	if err := l.logTrace(EventToolCall, step, map[string]any{
-		"call_id": callID, "tool_name": name, "args": args,
+func (l *Logger) LogToolCall(turn, step int, callID, name string, args map[string]any) error {
+	if err := l.logTrace(turn, EventToolCall, step, map[string]any{
+		"call_id":   callID,
+		"tool_name": name,
+		"args":      args,
 	}); err != nil {
 		return err
 	}
-	return l.writeSession(fmt.Sprintf("[%s] STEP %d | Tool Call:\n%s\n", nowUTC(), step, formatCall(name, args)))
+	return l.writeJSONBlock(
+		fmt.Sprintf("TURN %d STEP %d | TOOL CALL %s | call_id=%s", turn, step, name, callID),
+		args,
+	)
 }
 
-// LogToolResult records the outcome of a tool call.
-func (l *Logger) LogToolResult(step int, callID, name string, success bool, exitCode int, summary string, latencyMs float64) error {
-	if err := l.logTrace(EventToolResult, step, map[string]any{
-		"call_id": callID, "tool_name": name, "success": success,
-		"exit_code": exitCode, "latency_ms": latencyMs,
-	}); err != nil {
+// LogToolResult records the full raw output, plus the exact model-visible
+// content when truncation or the loop guard changed it.
+func (l *Logger) LogToolResult(turn, step int, callID, name string, success bool, exitCode int, rawOutput, modelVisible, spoolFile string, omittedChars int, latencyMs float64) error {
+	data := map[string]any{
+		"call_id":    callID,
+		"tool_name":  name,
+		"success":    success,
+		"exit_code":  exitCode,
+		"latency_ms": latencyMs,
+		"output":     rawOutput,
+	}
+	if modelVisible != "" {
+		data["model_content"] = modelVisible
+	}
+	if spoolFile != "" {
+		data["spool_file"] = spoolFile
+		data["omitted_chars"] = omittedChars
+	}
+	if err := l.logTrace(turn, EventToolResult, step, data); err != nil {
 		return err
 	}
-	return l.writeSession(fmt.Sprintf("[%s] STEP %d | Tool Result (exit_code=%d):\n%s\n", nowUTC(), step, exitCode, summary))
+
+	header := fmt.Sprintf(
+		"TURN %d STEP %d | TOOL RESULT %s | call_id=%s success=%t exit_code=%d latency_ms=%.1f",
+		turn, step, name, callID, success, exitCode, latencyMs,
+	)
+	if err := l.writeSession(fmt.Sprintf("[%s] %s\n", nowUTC(), header)); err != nil {
+		return err
+	}
+	if err := l.writeBlock("OUTPUT", rawOutput); err != nil {
+		return err
+	}
+	if modelVisible != "" {
+		meta := fmt.Sprintf("TRUNCATION | omitted=%d | spool=%s", omittedChars, spoolFile)
+		if spoolFile == "" {
+			meta = "MODEL INPUT DIFFERS FROM RAW OUTPUT"
+		}
+		if err := l.writeSession(fmt.Sprintf("[%s] %s\n", nowUTC(), meta)); err != nil {
+			return err
+		}
+		return l.writeBlock("MODEL INPUT", modelVisible)
+	}
+	return nil
 }
 
 // LogContextTruncation records that a tool output was truncated/spooled.
-func (l *Logger) LogContextTruncation(step int, callID, spoolFile string, omittedChars int) error {
-	return l.logTrace(EventContextTruncation, step, map[string]any{
-		"call_id": callID, "spool_file": spoolFile, "omitted_chars": omittedChars,
+func (l *Logger) LogContextTruncation(turn, step int, callID, spoolFile string, omittedChars int) error {
+	return l.logTrace(turn, EventContextTruncation, step, map[string]any{
+		"call_id":       callID,
+		"spool_file":    spoolFile,
+		"omitted_chars": omittedChars,
 	})
 }
 
-// LogContextSummary records that evicted history was summarized.
-func (l *Logger) LogContextSummary(step int, summary string) error {
-	return l.logTrace(EventContextSummary, step, map[string]any{"summary": summary})
+// LogContextPruning records a sliding-window eviction.
+func (l *Logger) LogContextPruning(turn, step, before, after, evicted int) error {
+	if err := l.logTrace(turn, EventContextPruning, step, map[string]any{
+		"before":  before,
+		"after":   after,
+		"evicted": evicted,
+	}); err != nil {
+		return err
+	}
+	return l.writeSession(fmt.Sprintf(
+		"[%s] TURN %d STEP %d | CONTEXT PRUNED | messages=%d->%d evicted=%d\n",
+		nowUTC(), turn, step, before, after, evicted,
+	))
+}
+
+// LogContextSummary records a newly produced context summary.
+func (l *Logger) LogContextSummary(turn, step int, summary string) error {
+	if err := l.logTrace(turn, EventContextSummary, step, map[string]any{"summary": summary}); err != nil {
+		return err
+	}
+	return l.writeBlock(fmt.Sprintf("TURN %d STEP %d | CONTEXT SUMMARY", turn, step), summary)
 }
 
 // LogLoopGuardTriggered records that the repeated tool-call guard fired.
-func (l *Logger) LogLoopGuardTriggered(step int, toolName string, args map[string]any, repeatCount int) error {
-	if err := l.logTrace(EventLoopGuardTriggered, step, map[string]any{
-		"tool_name": toolName, "args": args, "repeat_count": repeatCount,
+func (l *Logger) LogLoopGuardTriggered(turn, step int, toolName string, args map[string]any, repeatCount int) error {
+	if err := l.logTrace(turn, EventLoopGuardTriggered, step, map[string]any{
+		"tool_name":    toolName,
+		"args":         args,
+		"repeat_count": repeatCount,
 	}); err != nil {
 		return err
 	}
-	return l.writeSession(fmt.Sprintf("[%s] STEP %d | [LOOP DETECTED] %s repeated %d times with the same result\n", nowUTC(), step, toolName, repeatCount))
+	return l.writeSession(fmt.Sprintf(
+		"[%s] TURN %d STEP %d | [LOOP DETECTED] %s repeated %d times with the same result\n",
+		nowUTC(), turn, step, toolName, repeatCount,
+	))
 }
 
-// LogFinish records successful, natural session completion.
-func (l *Logger) LogFinish(step int, finalMessage string, totalSteps, totalTokens int) error {
-	if err := l.logTrace(EventSessionFinish, step, map[string]any{
-		"final_message": finalMessage, "total_steps": totalSteps, "total_tokens": totalTokens,
+// LogFinish records the final assistant answer for a successful turn.
+func (l *Logger) LogFinish(turn, step int, finalMessage string, totalSteps, totalTokens int) error {
+	if err := l.logTrace(turn, EventSessionFinish, step, map[string]any{
+		"final_message": finalMessage,
+		"total_steps":   totalSteps,
+		"total_tokens":  totalTokens,
 	}); err != nil {
 		return err
 	}
-	footer := fmt.Sprintf(
-		"%s\nFinal Response:\n%s\nCompleted: %s\nTotal Steps: %d\nTotal Tokens: %d\n%s\n",
-		strings.Repeat("=", 80), finalMessage, nowUTC(), totalSteps, totalTokens, strings.Repeat("=", 80),
-	)
-	return l.writeSession(footer)
+	return l.writeBlock(fmt.Sprintf("TURN %d | FINAL RESPONSE", turn), finalMessage)
 }
 
-// LogSessionError records a fatal session-ending error.
-func (l *Logger) LogSessionError(step int, errMsg string) error {
-	if err := l.logTrace(EventSessionError, step, map[string]any{"error": errMsg}); err != nil {
+// LogTurnEnd records the outcome of one turn.
+func (l *Logger) LogTurnEnd(turn int, outcome string, steps, tokens int) error {
+	if err := l.logTrace(turn, EventTurnFinish, steps, map[string]any{
+		"outcome": outcome,
+		"steps":   steps,
+		"tokens":  tokens,
+	}); err != nil {
 		return err
 	}
-	return l.writeSession(fmt.Sprintf("[%s] STEP %d | SESSION ERROR: %s\n", nowUTC(), step, errMsg))
+	return l.writeSession(fmt.Sprintf(
+		"[%s] TURN %d END | outcome=%s steps=%d tokens=%d\n",
+		nowUTC(), turn, outcome, steps, tokens,
+	))
 }
 
-// formatCall renders a tool call as a readable function-call expression,
-// e.g. bash(command="go test ./..."). Argument keys are sorted so the
-// same call always renders identically across log lines/runs (map
-// iteration order would otherwise be randomized per the Go spec).
-func formatCall(name string, args map[string]any) string {
-	keys := make([]string, 0, len(args))
-	for k := range args {
-		keys = append(keys, k)
+// LogRunEnd records the outcome of the whole process invocation.
+func (l *Logger) LogRunEnd(outcome string, exitCode, totalSteps, totalTokens int) error {
+	if err := l.logTrace(0, EventRunFinish, totalSteps, map[string]any{
+		"outcome":      outcome,
+		"exit_code":    exitCode,
+		"total_steps":  totalSteps,
+		"total_tokens": totalTokens,
+	}); err != nil {
+		return err
 	}
-	sort.Strings(keys)
+	return l.writeSession(fmt.Sprintf(
+		"[%s] RUN END | outcome=%s exit_code=%d steps=%d tokens=%d\n",
+		nowUTC(), outcome, exitCode, totalSteps, totalTokens,
+	))
+}
 
-	parts := make([]string, 0, len(keys))
-	for _, k := range keys {
-		parts = append(parts, fmt.Sprintf("%s=%q", k, fmt.Sprint(args[k])))
+// LogSessionError records a fatal or turn-ending error.
+func (l *Logger) LogSessionError(turn, step int, errMsg string) error {
+	if err := l.logTrace(turn, EventSessionError, step, map[string]any{"error": errMsg}); err != nil {
+		return err
 	}
-	return fmt.Sprintf("%s(%s)", name, strings.Join(parts, ", "))
+	return l.writeSession(fmt.Sprintf(
+		"[%s] TURN %d STEP %d | SESSION ERROR: %s\n",
+		nowUTC(), turn, step, errMsg,
+	))
 }
