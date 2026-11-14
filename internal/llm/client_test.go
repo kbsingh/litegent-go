@@ -144,6 +144,63 @@ func TestChatCompletion_SummaryRoleTranslatedForWire(t *testing.T) {
 	}
 }
 
+func TestChatCompletion_EmptyToolCallContentIsStringOnWire(t *testing.T) {
+	handler, bodies := captureBody()
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	c := newTestClient(t, server)
+	messages := []Message{
+		{Role: RoleUser, Content: "run a command"},
+		{
+			Role: RoleAssistant,
+			ToolCalls: []ToolCall{{
+				ID:       "call_1",
+				Type:     "function",
+				Function: FunctionCall{Name: "bash", Arguments: `{"command":"echo hi"}`},
+			}},
+		},
+		{Role: RoleTool, ToolCallID: "call_1", Content: `{"success":true}`},
+	}
+	if _, err := c.ChatCompletion(context.Background(), messages, nil); err != nil {
+		t.Fatalf("ChatCompletion returned error: %v", err)
+	}
+
+	var request struct {
+		Messages []map[string]json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(<-bodies), &request); err != nil {
+		t.Fatalf("unmarshaling captured request: %v", err)
+	}
+	if len(request.Messages) != len(messages) {
+		t.Fatalf("wire message count = %d, want %d", len(request.Messages), len(messages))
+	}
+	content, ok := request.Messages[1]["content"]
+	if !ok {
+		t.Fatal("assistant tool-call message omitted content")
+	}
+	var contentString string
+	if err := json.Unmarshal(content, &contentString); err != nil {
+		t.Fatalf("assistant tool-call content is not a JSON string: %s (%v)", content, err)
+	}
+	if contentString != "" {
+		t.Errorf("assistant tool-call content = %q, want empty string", contentString)
+	}
+	if _, ok := request.Messages[1]["tool_calls"]; !ok {
+		t.Fatal("assistant tool-call message lost tool_calls")
+	}
+}
+
+func TestInternalMessageEncodingRemainsUnchanged(t *testing.T) {
+	data, err := json.Marshal(Message{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "call_1"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `"content"`) {
+		t.Errorf("internal/persisted Message encoding changed: %s", data)
+	}
+}
+
 // captureBody returns a handler that echoes one canned response and
 // records the raw request body for capturedRequest to assert on.
 func captureBody() (http.HandlerFunc, <-chan string) {

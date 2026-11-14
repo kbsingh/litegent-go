@@ -54,20 +54,37 @@ type Message struct {
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 }
 
+// WireMessage is the chat message representation sent to an
+// OpenAI-compatible endpoint. Content is deliberately not optional: some
+// endpoints reject assistant tool-call messages if an empty content field
+// is omitted and interpreted as null.
+type WireMessage struct {
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
 // toWire converts internal messages to the wire format accepted by an
 // OpenAI-compatible endpoint, translating the internal RoleSummary
-// pseudo-role into a regular system message.
-func toWire(messages []Message) []Message {
-	wire := make([]Message, len(messages))
+// pseudo-role into a regular system message. It does not modify the
+// persisted/internal Message representation or its JSON encoding.
+func toWire(messages []Message) []WireMessage {
+	wire := make([]WireMessage, len(messages))
 	for i, m := range messages {
 		if m.Role == RoleSummary {
-			wire[i] = Message{
+			wire[i] = WireMessage{
 				Role:    RoleSystem,
 				Content: "<context_summary>\n" + m.Content + "\n</context_summary>",
 			}
 			continue
 		}
-		wire[i] = m
+		wire[i] = WireMessage{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCalls:  m.ToolCalls,
+			ToolCallID: m.ToolCallID,
+		}
 	}
 	return wire
 }
@@ -75,7 +92,7 @@ func toWire(messages []Message) []Message {
 // ChatRequest is the request body sent to POST /chat/completions.
 type ChatRequest struct {
 	Model           string           `json:"model"`
-	Messages        []Message        `json:"messages"`
+	Messages        []WireMessage    `json:"messages"`
 	Tools           []map[string]any `json:"tools,omitempty"`
 	ToolChoice      string           `json:"tool_choice,omitempty"`
 	Temperature     float64          `json:"temperature"`
