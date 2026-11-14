@@ -47,5 +47,6 @@ Complete technical documentation is located under `req/`:
 - **[Agent Guide (Engineering & Git Standards)](req/agent_guide.md)** — guidelines for AI and human developers.
 - **[User Guide](req/user_guide.md)** — installation, CLI reference, configuration, recipes, FAQ.
 - **[Milestones Implementation Plan](req/milestones_doc.md)** — the build order, reproducible from scratch.
+- **[Changelog](CHANGELOG.md)** — release notes and migration details.
 
 These documents are kept complete and current enough to rebuild Litegent from scratch without reading the source first.

@@ -84,5 +84,6 @@ All detailed specifications and guides are located in the `req/` directory:
 - [Agent Guide](agent_guide.md) (`req/agent_guide.md`): Guidelines for AI and human developers, including mandatory git commit metadata standards.
 - [User Guide](user_guide.md) (`req/user_guide.md`): Operational guide with installation, CLI reference, configuration, and recipes.
 - [Milestones Document](milestones_doc.md) (`req/milestones_doc.md`): The build order, with verification gates, reproducible from scratch.
+- [Changelog](../CHANGELOG.md) (`CHANGELOG.md`): Release notes, migration details, and binary-size measurements.
 
 These documents are kept complete and current enough to rebuild Litegent from scratch without reading the source first.
