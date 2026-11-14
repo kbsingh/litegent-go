@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"litegent/internal/llm"
 )
 
 func TestWordListsAreValid(t *testing.T) {
@@ -187,5 +190,153 @@ func TestNewRunIDUnique(t *testing.T) {
 	}
 	if a == b {
 		t.Errorf("NewRunID returned duplicate ids: %q", a)
+	}
+}
+
+func TestResumeExistingSession(t *testing.T) {
+	top := t.TempDir()
+	info, err := create(top, Options{}, func() string { return "brave-otter-runs" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveContext(info, []llm.Message{{Role: llm.RoleSystem, Content: "system"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := info.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	resumed, err := Resume(top, info.ID, Options{})
+	if err != nil {
+		t.Fatalf("Resume returned error: %v", err)
+	}
+	defer resumed.Close()
+	if resumed.ID != info.ID || resumed.Dir != info.Dir {
+		t.Errorf("resumed session mismatch: %+v", resumed)
+	}
+	m, err := LoadManifest(resumed.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.RunCount != 2 {
+		t.Errorf("RunCount = %d, want 2", m.RunCount)
+	}
+}
+
+func TestResumeMissingSession(t *testing.T) {
+	if _, err := Resume(t.TempDir(), "brave-otter-runs", Options{}); err == nil {
+		t.Fatal("expected missing session to fail")
+	}
+}
+
+func TestResumeInvalidID(t *testing.T) {
+	if _, err := Resume(t.TempDir(), "../escape", Options{}); err == nil {
+		t.Fatal("expected invalid id to fail")
+	}
+}
+
+func TestResumeRejectsSymlink(t *testing.T) {
+	top := t.TempDir()
+	target := filepath.Join(top, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(top, "brave-otter-runs")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Resume(top, "brave-otter-runs", Options{}); err == nil {
+		t.Fatal("expected symlinked session to fail")
+	}
+}
+
+func TestResumeRefusesLockedSession(t *testing.T) {
+	top := t.TempDir()
+	info, err := create(top, Options{}, func() string { return "brave-otter-runs" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer info.Close()
+	if err := SaveContext(info, []llm.Message{{Role: llm.RoleSystem, Content: "system"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Resume(top, info.ID, Options{}); err == nil {
+		t.Fatal("expected locked session to be refused")
+	}
+}
+
+func TestResumeRequiresContext(t *testing.T) {
+	top := t.TempDir()
+	info, err := create(top, Options{}, func() string { return "brave-otter-runs" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := info.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Resume(top, info.ID, Options{}); err == nil {
+		t.Fatal("expected session without context to fail")
+	}
+}
+
+func TestLatestID(t *testing.T) {
+	top := t.TempDir()
+	first, err := create(top, Options{}, func() string { return "brave-otter-runs" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveContext(first, []llm.Message{{Role: llm.RoleSystem, Content: "system"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := create(top, Options{}, func() string { return "calm-river-sings" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveContext(second, []llm.Message{{Role: llm.RoleSystem, Content: "system"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := UpdateManifest(first, func(m *Manifest) {
+		m.LastUsedAt = time.Now().UTC().Add(-time.Hour)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateManifest(second, func(m *Manifest) {
+		m.LastUsedAt = time.Now().UTC()
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	id, err := LatestID(top)
+	if err != nil {
+		t.Fatalf("LatestID returned error: %v", err)
+	}
+	if id != "calm-river-sings" {
+		t.Errorf("LatestID = %q, want calm-river-sings", id)
+	}
+}
+
+func TestSetTurnCount(t *testing.T) {
+	top := t.TempDir()
+	info, err := create(top, Options{}, func() string { return "brave-otter-runs" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer info.Close()
+	if err := SetTurnCount(info, 7); err != nil {
+		t.Fatal(err)
+	}
+	m, err := LoadManifest(info.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.TurnCount != 7 {
+		t.Errorf("TurnCount = %d, want 7", m.TurnCount)
 	}
 }

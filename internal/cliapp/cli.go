@@ -71,8 +71,8 @@ const (
 const usage = `litegent - an autonomous, unconfined CLI AI agent for Linux
 
 Usage:
-  litegent [-s <system_prompt_file>] -p <user_prompt_file> [-c <config_file>] [-k <skills_directory>] [-v]
-  litegent [-s <system_prompt_file>] -i [-c <config_file>] [-k <skills_directory>] [-v]
+  litegent [-s <system_prompt_file>] -p <user_prompt_file> [-c <config_file>] [-k <skills_directory>] [-v] [-r <session-id> | --resume-last]
+  litegent [-s <system_prompt_file>] -i [-c <config_file>] [-k <skills_directory>] [-v] [-r <session-id> | --resume-last]
 
 Flags:
   -s, --system PATH   Path to the system prompt file (default: <top_dir>/system.md, created if absent)
@@ -80,6 +80,8 @@ Flags:
   -c, --config PATH   Path to the JSON config file (default: ~/.litegent/config.json)
   -k, --skills PATH   Path to a directory of skill Markdown files (optional)
   -i, --interactive   Read repeated task prompts from stdin; conflicts with -p
+  -r, --resume ID     Resume an existing session instead of creating a new one
+      --resume-last   Resume the most recently used session
   -v, --verbose       Enable verbose progress output to stderr as the loop runs
   -h, --help          Show this help message
       --version       Show version information
@@ -160,6 +162,8 @@ type cliArgs struct {
 	promptPath  string
 	configPath  string
 	skillsPath  string
+	resumeID    string
+	resumeLast  bool
 	verbose     bool
 	interactive bool
 	showHelp    bool
@@ -183,6 +187,9 @@ func parseArgs(argv []string) (*cliArgs, error) {
 	fs.StringVar(&args.configPath, "config", "", "path to JSON config file (default: ~/.litegent/config.json)")
 	fs.StringVar(&args.skillsPath, "k", "", "path to skills directory")
 	fs.StringVar(&args.skillsPath, "skills", "", "path to skills directory")
+	fs.StringVar(&args.resumeID, "r", "", "resume an existing session by id")
+	fs.StringVar(&args.resumeID, "resume", "", "resume an existing session by id")
+	fs.BoolVar(&args.resumeLast, "resume-last", false, "resume the most recently used session")
 	fs.BoolVar(&args.verbose, "v", false, "enable verbose output")
 	fs.BoolVar(&args.verbose, "verbose", false, "enable verbose output")
 	fs.BoolVar(&args.interactive, "i", false, "read repeated task prompts from stdin")
@@ -218,6 +225,10 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	if args.interactive && args.promptPath != "" {
 		fmt.Fprintf(stderr, "litegent: -i/--interactive conflicts with -p/--prompt\n\n%s", usage)
+		return ExitConfigOrCLIError
+	}
+	if args.resumeID != "" && args.resumeLast {
+		fmt.Fprintf(stderr, "litegent: -r/--resume conflicts with --resume-last\n\n%s", usage)
 		return ExitConfigOrCLIError
 	}
 
@@ -257,29 +268,39 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return ExitConfigOrCLIError
 	}
 
-	// Resolve the system prompt: an explicit -s always wins. Otherwise
-	// ensure <top_dir>/system.md exists, creating it with the built-in
-	// prompt on first use, then load it.
+	// Resolve the system prompt: an explicit -s always wins. For a new
+	// session, ensure <top_dir>/system.md exists, creating it with the
+	// built-in prompt on first use. A resumed session never creates a new
+	// default prompt; its stored system message is authoritative.
+	resuming := args.resumeID != "" || args.resumeLast
 	systemPrompt := defaultSystemPrompt
 	systemPath := args.systemPath
 	if systemPath == "" {
 		systemPath = defaultSystemPromptPath(cfg.TopDir)
-		created, ensureErr := ensureDefaultSystemPrompt(systemPath, defaultSystemPrompt)
-		if ensureErr != nil {
-			fmt.Fprintf(stderr, "litegent: preparing default system prompt: %v\n", ensureErr)
-			return ExitConfigOrCLIError
-		}
-		if created {
-			fmt.Fprintf(stderr, "litegent: created default system prompt at %s\n", systemPath)
+		if !resuming {
+			created, ensureErr := ensureDefaultSystemPrompt(systemPath, defaultSystemPrompt)
+			if ensureErr != nil {
+				fmt.Fprintf(stderr, "litegent: preparing default system prompt: %v\n", ensureErr)
+				return ExitConfigOrCLIError
+			}
+			if created {
+				fmt.Fprintf(stderr, "litegent: created default system prompt at %s\n", systemPath)
+			}
 		}
 	}
 	if systemPath != "" {
 		systemBytes, readErr := os.ReadFile(systemPath)
 		if readErr != nil {
-			fmt.Fprintf(stderr, "litegent: reading system prompt: %v\n", readErr)
-			return ExitConfigOrCLIError
+			if resuming && args.systemPath == "" && errors.Is(readErr, fs.ErrNotExist) {
+				// No prompt beside the config; the stored session prompt
+				// remains authoritative after it is loaded.
+			} else {
+				fmt.Fprintf(stderr, "litegent: reading system prompt: %v\n", readErr)
+				return ExitConfigOrCLIError
+			}
+		} else {
+			systemPrompt = string(systemBytes)
 		}
-		systemPrompt = string(systemBytes)
 	}
 
 	var promptBytes []byte
@@ -317,19 +338,68 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 	}
 
-	sess, err := session.Create(cfg.TopDir, session.Options{
+	opts := session.Options{
 		LogSubdir:   cfg.LogDir,
 		SpoolSubdir: cfg.ContextConfig.SpoolDir,
 		Model:       cfg.Model,
 		BaseURL:     cfg.BaseURL,
-	})
-	if err != nil {
-		fmt.Fprintf(stderr, "litegent: creating session: %v\n", err)
-		return ExitConfigOrCLIError
+	}
+	var (
+		sess      *session.Info
+		store     *session.Store
+		history   []llm.Message
+		startTurn int
+	)
+	if resuming {
+		id := args.resumeID
+		if args.resumeLast {
+			id, err = session.LatestID(cfg.TopDir)
+			if err != nil {
+				fmt.Fprintf(stderr, "litegent: finding latest session: %v\n", err)
+				return ExitConfigOrCLIError
+			}
+		}
+		sess, err = session.Resume(cfg.TopDir, id, opts)
+		if err != nil {
+			fmt.Fprintf(stderr, "litegent: resuming session: %v\n", err)
+			return ExitConfigOrCLIError
+		}
+		defer sess.Close()
+		store = &session.Store{Info: sess}
+		history, err = store.LoadContext()
+		if err != nil {
+			fmt.Fprintf(stderr, "litegent: loading session context: %v\n", err)
+			return ExitConfigOrCLIError
+		}
+		storedSystemPrompt := history[0].Content
+		if storedSystemPrompt != systemPrompt {
+			fmt.Fprintf(stderr, "litegent: warning: system prompt/skills changed since session %s was created; using the stored prompt\n", sess.ID)
+		}
+		systemPrompt = storedSystemPrompt
+		manifest, manifestErr := session.LoadManifest(sess.Dir)
+		if manifestErr != nil {
+			fmt.Fprintf(stderr, "litegent: loading session manifest: %v\n", manifestErr)
+			return ExitConfigOrCLIError
+		}
+		startTurn = manifest.TurnCount
+		fmt.Fprintf(stderr, "litegent: resumed session %s (%s)\n", sess.ID, sess.Dir)
+	} else {
+		sess, err = session.Create(cfg.TopDir, opts)
+		if err != nil {
+			fmt.Fprintf(stderr, "litegent: creating session: %v\n", err)
+			return ExitConfigOrCLIError
+		}
+		defer sess.Close()
+		store = &session.Store{Info: sess}
+		history = []llm.Message{{Role: llm.RoleSystem, Content: systemPrompt}}
+		if err := store.SaveContext(history); err != nil {
+			fmt.Fprintf(stderr, "litegent: initializing context: %v\n", err)
+			return ExitConfigOrCLIError
+		}
+		fmt.Fprintf(stderr, "litegent: session %s (%s)\n", sess.ID, sess.Dir)
 	}
 	cfg.LogDir = sess.LogDir
 	cfg.ContextConfig.SpoolDir = sess.SpoolDir
-	fmt.Fprintf(stderr, "litegent: session %s (%s)\n", sess.ID, sess.Dir)
 
 	logger, err := logging.NewWithRunID(sess.LogDir, cfg.APIKey, sess.RunID)
 	if err != nil {
@@ -337,12 +407,6 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return ExitConfigOrCLIError
 	}
 	defer logger.Close()
-
-	store := &session.Store{Info: sess}
-	if err := store.SaveContext([]llm.Message{{Role: llm.RoleSystem, Content: systemPrompt}}); err != nil {
-		fmt.Fprintf(stderr, "litegent: initializing context: %v\n", err)
-		return ExitConfigOrCLIError
-	}
 
 	registry := buildRegistry(cfg)
 	llmClient := llm.NewClient(cfg)
@@ -357,7 +421,7 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	defer cancel()
 
 	workDir, _ := os.Getwd()
-	if err := logger.LogSessionStart(sess.ID, sess.RunID, false, cfg.Model, cfg.BaseURL, workDir, systemPrompt); err != nil && args.verbose {
+	if err := logger.LogSessionStart(sess.ID, sess.RunID, resuming, cfg.Model, cfg.BaseURL, workDir, systemPrompt); err != nil && args.verbose {
 		fmt.Fprintf(stderr, "litegent: warning: failed to write session start: %v\n", err)
 	}
 	prog.Startup(cfg.Model, cfg.BaseURL, len(registry.Schemas()), args.interactive)
@@ -366,11 +430,14 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	if args.interactive {
-		return runInteractive(ctx, ag, systemPrompt, cfg, prog, logger, stdin, stdout, stderr)
+		return runInteractive(ctx, ag, history, startTurn, sess, cfg, prog, logger, stdin, stdout, stderr)
 	}
 
-	result := ag.Run(ctx, systemPrompt, string(promptBytes))
-	prog.SessionEnd(result.Outcome.String(), 1)
+	result := ag.RunWithHistory(ctx, history, string(promptBytes), startTurn+1)
+	if result.Outcome == agent.OutcomeSuccess || result.Outcome == agent.OutcomeMaxStepsExceeded {
+		_ = session.SetTurnCount(sess, startTurn+1)
+	}
+	prog.SessionEnd(result.Outcome.String(), result.Steps)
 
 	exitCode := ExitSuccess
 	switch result.Outcome {
@@ -400,7 +467,7 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // and prints each turn's final response to stdout as it completes.
 // Conversation history persists across turns via agent.Agent.RunInteractive;
 // each turn gets its own independent max_steps budget.
-func runInteractive(ctx context.Context, ag *agent.Agent, systemPrompt string, cfg config.LitegentConfig, prog *progress.Reporter, logger *logging.Logger, stdin io.Reader, stdout, stderr io.Writer) int {
+func runInteractive(ctx context.Context, ag *agent.Agent, history []llm.Message, startTurn int, sess *session.Info, cfg config.LitegentConfig, prog *progress.Reporter, logger *logging.Logger, stdin io.Reader, stdout, stderr io.Writer) int {
 	reader := bufio.NewReader(stdin)
 
 	readPrompt := func() (string, bool) {
@@ -440,10 +507,12 @@ func runInteractive(ctx context.Context, ag *agent.Agent, systemPrompt string, c
 	onTurnResult := func(turn int, result agent.Result) bool {
 		switch result.Outcome {
 		case agent.OutcomeSuccess:
+			_ = session.SetTurnCount(sess, turn)
 			fmt.Fprintln(stdout, result.FinalMessage)
 			fmt.Fprintln(stdout, turnSeparator)
 			return true
 		case agent.OutcomeMaxStepsExceeded:
+			_ = session.SetTurnCount(sess, turn)
 			fmt.Fprintf(stderr, "litegent: turn %d: max_steps (%d) exceeded without a final response\n", turn, cfg.MaxSteps)
 			return true // the session continues; the user can try a different approach
 		case agent.OutcomeInterrupted:
@@ -458,7 +527,7 @@ func runInteractive(ctx context.Context, ag *agent.Agent, systemPrompt string, c
 		}
 	}
 
-	result := ag.RunInteractive(ctx, systemPrompt, readPrompt, onTurnResult)
+	result := ag.RunInteractiveWithHistory(ctx, history, startTurn, readPrompt, onTurnResult)
 	prog.SessionEnd(result.Outcome.String(), result.Steps)
 
 	exitCode := ExitSuccess

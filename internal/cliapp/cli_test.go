@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"litegent/internal/llm"
 	"litegent/internal/session"
@@ -52,6 +54,25 @@ func assertRunLogs(t *testing.T, root string) {
 	if traces == 0 || sessions == 0 {
 		t.Fatalf("expected trace and session logs under %s, got traces=%d sessions=%d", root, traces, sessions)
 	}
+}
+
+func findSessionDirs(t *testing.T, root string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("reading %s: %v", root, err)
+	}
+	var dirs []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(root, e.Name())
+		if _, err := os.Stat(filepath.Join(dir, "session.json")); err == nil {
+			dirs = append(dirs, dir)
+		}
+	}
+	return dirs
 }
 
 func TestRun_Version(t *testing.T) {
@@ -748,5 +769,305 @@ func TestRun_CreatesSessionLayout(t *testing.T) {
 	last := msgs[len(msgs)-1]
 	if last.Role != llm.RoleAssistant || last.Content != "done" {
 		t.Errorf("context does not end with the final assistant answer: %+v", last)
+	}
+}
+
+func TestRun_ResumeRestoresContextAndAppends(t *testing.T) {
+	var mu sync.Mutex
+	var requests []llm.ChatRequest
+	answer := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req llm.ChatRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		mu.Lock()
+		requests = append(requests, req)
+		answer++
+		content := fmt.Sprintf("answer %d", answer)
+		mu.Unlock()
+		json.NewEncoder(w).Encode(llm.ChatResponse{
+			Choices: []llm.Choice{{Message: llm.Message{Role: llm.RoleAssistant, Content: content}, FinishReason: "stop"}},
+		})
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	cfgPath := writeFile(t, dir, "config.json", `{
+  "base_url": "`+server.URL+`",
+  "model": "test-model"
+}`)
+	prompt1 := writeFile(t, dir, "prompt1.txt", "first question")
+	prompt2 := writeFile(t, dir, "prompt2.txt", "second question")
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"-p", prompt1, "-c", cfgPath}, strings.NewReader(""), &stdout, &stderr); code != ExitSuccess {
+		t.Fatalf("first run failed: code=%d stderr=%s", code, stderr.String())
+	}
+	sessions := findSessionDirs(t, dir)
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	sessionID := filepath.Base(sessions[0])
+
+	firstRunRequests := len(requests)
+	stdout.Reset()
+	stderr.Reset()
+	code := Run([]string{"-p", prompt2, "-c", cfgPath, "-r", sessionID}, strings.NewReader(""), &stdout, &stderr)
+	if code != ExitSuccess {
+		t.Fatalf("resume failed: code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "resumed session "+sessionID) {
+		t.Errorf("expected resumed-session notice, got: %q", stderr.String())
+	}
+	if got := findSessionDirs(t, dir); len(got) != 1 {
+		t.Errorf("resume created a new session: %v", got)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(requests) <= firstRunRequests {
+		t.Fatalf("resume made no LLM request")
+	}
+	req := requests[firstRunRequests]
+	var sawFirst, sawAnswer, sawSecond bool
+	for _, msg := range req.Messages {
+		switch msg.Content {
+		case "first question":
+			sawFirst = true
+		case "answer 1":
+			sawAnswer = true
+		case "second question":
+			sawSecond = true
+		}
+	}
+	if !sawFirst || !sawAnswer || !sawSecond {
+		t.Errorf("resumed request missing history: %+v", req.Messages)
+	}
+
+	info := &session.Info{Dir: sessions[0], ManifestPath: filepath.Join(sessions[0], "session.json")}
+	m, err := session.LoadManifest(info.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.TurnCount != 2 {
+		t.Errorf("TurnCount = %d, want 2", m.TurnCount)
+	}
+}
+
+func TestRun_ResumeMissingSessionFails(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeFile(t, dir, "config.json", `{"model": "gpt-4o"}`)
+	promptPath := writeFile(t, dir, "prompt.txt", "task")
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"-p", promptPath, "-c", cfgPath, "-r", "brave-otter-runs"}, strings.NewReader(""), &stdout, &stderr)
+	if code != ExitConfigOrCLIError {
+		t.Fatalf("exit code = %d, want %d", code, ExitConfigOrCLIError)
+	}
+	if !strings.Contains(stderr.String(), "not found") {
+		t.Errorf("expected not-found error, got: %q", stderr.String())
+	}
+	if dirs := findSessionDirs(t, dir); len(dirs) != 0 {
+		t.Errorf("failed resume created session directories: %v", dirs)
+	}
+}
+
+func TestRun_ResumeInvalidIDFails(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeFile(t, dir, "config.json", `{"model": "gpt-4o"}`)
+	promptPath := writeFile(t, dir, "prompt.txt", "task")
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"-p", promptPath, "-c", cfgPath, "-r", "../escape"}, strings.NewReader(""), &stdout, &stderr)
+	if code != ExitConfigOrCLIError {
+		t.Fatalf("exit code = %d, want %d", code, ExitConfigOrCLIError)
+	}
+	if dirs := findSessionDirs(t, dir); len(dirs) != 0 {
+		t.Errorf("invalid resume created session directories: %v", dirs)
+	}
+}
+
+func TestRun_ResumeConflictsWithResumeLast(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"-i", "-r", "brave-otter-runs", "--resume-last"}, strings.NewReader(""), &stdout, &stderr)
+	if code != ExitConfigOrCLIError {
+		t.Fatalf("exit code = %d, want %d", code, ExitConfigOrCLIError)
+	}
+	if !strings.Contains(stderr.String(), "conflicts with --resume-last") {
+		t.Errorf("expected conflict error, got: %q", stderr.String())
+	}
+}
+
+func TestRun_ResumeLastSelectsMostRecent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(llm.ChatResponse{
+			Choices: []llm.Choice{{Message: llm.Message{Role: llm.RoleAssistant, Content: "ok"}, FinishReason: "stop"}},
+		})
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	cfgPath := writeFile(t, dir, "config.json", `{
+  "base_url": "`+server.URL+`",
+  "model": "test-model"
+}`)
+	promptPath := writeFile(t, dir, "prompt.txt", "task")
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"-p", promptPath, "-c", cfgPath}, strings.NewReader(""), &stdout, &stderr); code != ExitSuccess {
+		t.Fatalf("first run failed: %s", stderr.String())
+	}
+	first := findSessionDirs(t, dir)
+	if len(first) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(first))
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"-p", promptPath, "-c", cfgPath}, strings.NewReader(""), &stdout, &stderr); code != ExitSuccess {
+		t.Fatalf("second run failed: %s", stderr.String())
+	}
+	all := findSessionDirs(t, dir)
+	if len(all) != 2 {
+		t.Fatalf("expected 2 sessions, got %d", len(all))
+	}
+	var newest string
+	for _, d := range all {
+		if d != first[0] {
+			newest = d
+		}
+	}
+	if newest == "" {
+		t.Fatal("could not identify the second session")
+	}
+
+	// Make the selection deterministic regardless of clock resolution.
+	oldInfo := &session.Info{Dir: first[0], ManifestPath: filepath.Join(first[0], "session.json")}
+	newInfo := &session.Info{Dir: newest, ManifestPath: filepath.Join(newest, "session.json")}
+	if err := session.UpdateManifest(oldInfo, func(m *session.Manifest) {
+		m.LastUsedAt = time.Now().UTC().Add(-time.Hour)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.UpdateManifest(newInfo, func(m *session.Manifest) {
+		m.LastUsedAt = time.Now().UTC()
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code := Run([]string{"-p", promptPath, "-c", cfgPath, "--resume-last"}, strings.NewReader(""), &stdout, &stderr)
+	if code != ExitSuccess {
+		t.Fatalf("resume-last failed: code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "resumed session "+filepath.Base(newest)) {
+		t.Errorf("resume-last picked the wrong session, stderr: %q", stderr.String())
+	}
+}
+
+func TestRun_ResumeWarnsOnSystemPromptDrift(t *testing.T) {
+	var mu sync.Mutex
+	var lastRequest llm.ChatRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req llm.ChatRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		mu.Lock()
+		lastRequest = req
+		mu.Unlock()
+		json.NewEncoder(w).Encode(llm.ChatResponse{
+			Choices: []llm.Choice{{Message: llm.Message{Role: llm.RoleAssistant, Content: "ok"}, FinishReason: "stop"}},
+		})
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	writeFile(t, dir, "system.md", "old system prompt")
+	cfgPath := writeFile(t, dir, "config.json", `{
+  "base_url": "`+server.URL+`",
+  "model": "test-model"
+}`)
+	promptPath := writeFile(t, dir, "prompt.txt", "task")
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"-p", promptPath, "-c", cfgPath}, strings.NewReader(""), &stdout, &stderr); code != ExitSuccess {
+		t.Fatalf("first run failed: %s", stderr.String())
+	}
+	sessions := findSessionDirs(t, dir)
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	if err := os.WriteFile(filepath.Join(dir, "system.md"), []byte("new system prompt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code := Run([]string{"-p", promptPath, "-c", cfgPath, "-r", filepath.Base(sessions[0])}, strings.NewReader(""), &stdout, &stderr)
+	if code != ExitSuccess {
+		t.Fatalf("resume failed: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "system prompt/skills changed") {
+		t.Errorf("expected drift warning, got: %q", stderr.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(lastRequest.Messages) == 0 || lastRequest.Messages[0].Content != "old system prompt" {
+		t.Errorf("resume did not preserve the stored system prompt: %+v", lastRequest.Messages)
+	}
+}
+
+func TestRun_ResumeInteractiveContinuesHistory(t *testing.T) {
+	var mu sync.Mutex
+	var requests []llm.ChatRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req llm.ChatRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		mu.Lock()
+		requests = append(requests, req)
+		mu.Unlock()
+		json.NewEncoder(w).Encode(llm.ChatResponse{
+			Choices: []llm.Choice{{Message: llm.Message{Role: llm.RoleAssistant, Content: "ok"}, FinishReason: "stop"}},
+		})
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	cfgPath := writeFile(t, dir, "config.json", `{
+  "base_url": "`+server.URL+`",
+  "model": "test-model"
+}`)
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"-i", "-c", cfgPath}, strings.NewReader("first turn\n/exit\n"), &stdout, &stderr); code != ExitSuccess {
+		t.Fatalf("first interactive run failed: %s", stderr.String())
+	}
+	sessions := findSessionDirs(t, dir)
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	before := len(requests)
+
+	stdout.Reset()
+	stderr.Reset()
+	code := Run([]string{"-i", "-c", cfgPath, "-r", filepath.Base(sessions[0])}, strings.NewReader("second turn\n/exit\n"), &stdout, &stderr)
+	if code != ExitSuccess {
+		t.Fatalf("resumed interactive run failed: %s", stderr.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(requests) <= before {
+		t.Fatal("resumed interactive run made no LLM request")
+	}
+	req := requests[before]
+	var sawFirst, sawSecond bool
+	for _, msg := range req.Messages {
+		if msg.Role == llm.RoleUser && msg.Content == "first turn" {
+			sawFirst = true
+		}
+		if msg.Role == llm.RoleUser && msg.Content == "second turn" {
+			sawSecond = true
+		}
+	}
+	if !sawFirst || !sawSecond {
+		t.Errorf("resumed interactive request missing prior or new turn: %+v", req.Messages)
 	}
 }

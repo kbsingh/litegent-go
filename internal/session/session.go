@@ -45,6 +45,15 @@ type Info struct {
 	LogDir       string
 	SpoolDir     string
 	LockPath     string
+	Lock         *Lock
+}
+
+// Close releases the session lock. It is safe to call more than once.
+func (i *Info) Close() error {
+	if i == nil {
+		return nil
+	}
+	return i.Lock.Release()
 }
 
 // Manifest is the durable metadata for a session. It intentionally never
@@ -117,7 +126,17 @@ func create(topDir string, opts Options, nextID func() string) (*Info, error) {
 	return nil, fmt.Errorf("could not generate a unique session id after %d attempts", maxCreateTries)
 }
 
-func initialize(dir, id string, opts Options) (*Info, error) {
+func initialize(dir, id string, opts Options) (info *Info, err error) {
+	lock, lockErr := acquireLock(dir)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer func() {
+		if err != nil {
+			_ = lock.Release()
+		}
+	}()
+
 	logSubdir := opts.LogSubdir
 	if logSubdir == "" {
 		logSubdir = "logs"
@@ -166,6 +185,7 @@ func initialize(dir, id string, opts Options) (*Info, error) {
 		LogDir:       logDir,
 		SpoolDir:     spoolDir,
 		LockPath:     filepath.Join(dir, LockName),
+		Lock:         lock,
 	}, nil
 }
 
@@ -234,4 +254,153 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	return nil
+}
+
+// Resume opens an existing session, validates its layout and manifest,
+// acquires its lock, and records a new run. It never creates a new session
+// or falls back when the requested session is missing.
+func Resume(topDir, id string, opts Options) (*Info, error) {
+	if err := ValidateID(id); err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(topDir, id)
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("session %q not found under %q", id, topDir)
+		}
+		return nil, fmt.Errorf("checking session %q: %w", id, err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("session %q must not be a symlink", id)
+	}
+	if !fi.IsDir() {
+		return nil, fmt.Errorf("session %q is not a directory", id)
+	}
+
+	lock, err := acquireLock(dir)
+	if err != nil {
+		return nil, err
+	}
+	info, err := openLocked(dir, id, opts, lock)
+	if err != nil {
+		_ = lock.Release()
+		return nil, err
+	}
+	return info, nil
+}
+
+func openLocked(dir, id string, opts Options, lock *Lock) (*Info, error) {
+	m, err := LoadManifest(dir)
+	if err != nil {
+		return nil, err
+	}
+	contextPath := filepath.Join(dir, ContextName)
+	if _, err := os.Stat(contextPath); err != nil {
+		return nil, fmt.Errorf("session %q is missing its context blob: %w", id, err)
+	}
+
+	logDir, err := resolveSessionSubdir(dir, opts.LogSubdir, "logs")
+	if err != nil {
+		return nil, err
+	}
+	spoolDir, err := resolveSessionSubdir(dir, opts.SpoolSubdir, "spool")
+	if err != nil {
+		return nil, err
+	}
+
+	m.LastUsedAt = time.Now().UTC()
+	m.RunCount++
+	if err := writeManifest(filepath.Join(dir, ManifestName), m); err != nil {
+		return nil, err
+	}
+
+	return &Info{
+		ID:           id,
+		RunID:        NewRunID(),
+		Dir:          dir,
+		ManifestPath: filepath.Join(dir, ManifestName),
+		ContextPath:  contextPath,
+		LogDir:       logDir,
+		SpoolDir:     spoolDir,
+		LockPath:     filepath.Join(dir, LockName),
+		Lock:         lock,
+	}, nil
+}
+
+func resolveSessionSubdir(dir, sub, fallback string) (string, error) {
+	if sub == "" {
+		sub = fallback
+	}
+	path, err := config.ResolveUnder(dir, sub)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return "", fmt.Errorf("creating session directory %q: %w", path, err)
+	}
+	return path, nil
+}
+
+// LatestID returns the ID of the most recently used valid session under
+// topDir. Ties are broken deterministically by ID.
+func LatestID(topDir string) (string, error) {
+	entries, err := os.ReadDir(topDir)
+	if err != nil {
+		return "", fmt.Errorf("reading top_dir %q: %w", topDir, err)
+	}
+	var best Manifest
+	found := false
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		id := entry.Name()
+		if err := ValidateID(id); err != nil {
+			continue
+		}
+		dir := filepath.Join(topDir, id)
+		fi, err := os.Lstat(dir)
+		if err != nil || fi.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(dir, ContextName)); err != nil {
+			continue
+		}
+		m, err := LoadManifest(dir)
+		if err != nil {
+			continue
+		}
+		if !found || m.LastUsedAt.After(best.LastUsedAt) ||
+			(m.LastUsedAt.Equal(best.LastUsedAt) && m.ID > best.ID) {
+			best = m
+			found = true
+		}
+	}
+	if !found {
+		return "", fmt.Errorf("no valid sessions found under %q", topDir)
+	}
+	return best.ID, nil
+}
+
+// UpdateManifest loads the current manifest, applies fn, and writes it
+// back atomically.
+func UpdateManifest(info *Info, fn func(*Manifest)) error {
+	if info == nil {
+		return fmt.Errorf("session info must not be nil")
+	}
+	m, err := LoadManifest(info.Dir)
+	if err != nil {
+		return err
+	}
+	fn(&m)
+	return writeManifest(info.ManifestPath, m)
+}
+
+// SetTurnCount records the highest completed turn number.
+func SetTurnCount(info *Info, turn int) error {
+	return UpdateManifest(info, func(m *Manifest) {
+		m.TurnCount = turn
+		m.LastUsedAt = time.Now().UTC()
+	})
 }
