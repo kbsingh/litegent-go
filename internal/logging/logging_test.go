@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"litegent/internal/llm"
 )
 
 func newTestLogger(t *testing.T, apiKey string) *Logger {
@@ -253,7 +255,7 @@ func TestAPIKeyRedaction_ShortKeyFullyMasked(t *testing.T) {
 func TestLogContextPruningAndSummary(t *testing.T) {
 	l := newTestLogger(t, "")
 	l.LogContextPruning(2, 4, 42, 22, 20)
-	l.LogContextSummary(2, 4, "important findings")
+	l.LogContextSummary(2, 4, "important findings", llm.Usage{PromptTokens: 12, CompletionTokens: 3, TotalTokens: 15}, true)
 
 	events := readTraceEvents(t, l.TracePath)
 	if len(events) != 2 {
@@ -262,11 +264,14 @@ func TestLogContextPruningAndSummary(t *testing.T) {
 	if events[0].EventType != EventContextPruning || events[1].EventType != EventContextSummary {
 		t.Errorf("unexpected event types: %+v", events)
 	}
+	if events[1].Data["usage_reported"] != true || events[1].Data["total_tokens"].(float64) != 15 {
+		t.Errorf("summary usage metadata missing: %+v", events[1].Data)
+	}
 	session := readSession(t, l.SessionPath)
 	if !strings.Contains(session, "CONTEXT PRUNED | messages=42->22 evicted=20") {
 		t.Errorf("pruning line missing: %q", session)
 	}
-	if !strings.Contains(session, "CONTEXT SUMMARY") || !strings.Contains(session, "important findings") {
+	if !strings.Contains(session, "CONTEXT SUMMARY") || !strings.Contains(session, "important findings") || !strings.Contains(session, "tokens_in=12 tokens_out=3") {
 		t.Errorf("summary block missing: %q", session)
 	}
 }

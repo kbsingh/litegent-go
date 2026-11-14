@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"litegent/internal/config"
 	"litegent/internal/ctxmgr"
@@ -153,6 +156,114 @@ func TestAgent_CompletesAfterToolCall(t *testing.T) {
 	}
 	if result.Steps != 2 {
 		t.Errorf("Steps = %d, want 2", result.Steps)
+	}
+}
+
+func TestAgent_CollectsTurnMetrics(t *testing.T) {
+	toolResponse := toolCallResponse("call_1", "echo_tool", `{"text":"hi"}`)
+	toolResponse.Usage = llm.Usage{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12}
+	final := finalResponse("Done!")
+	final.Usage = llm.Usage{PromptTokens: 20, CompletionTokens: 3, TotalTokens: 23}
+	server := newScriptedServer(toolResponse, final)
+	registry := tools.NewRegistry()
+	registry.Register(&fakeTool{name: "echo_tool", fn: func(n int, args map[string]any) *tools.ToolResult {
+		return &tools.ToolResult{Success: true, Output: "hi"}
+	}})
+	a := newTestAgent(t, server, registry, nil)
+
+	result := a.Run(context.Background(), "system", "task")
+	if result.Outcome != OutcomeSuccess {
+		t.Fatalf("Outcome = %v, err=%v", result.Outcome, result.Err)
+	}
+	if result.Steps != 2 || result.ToolCalls != 1 || result.LLMCalls != 2 {
+		t.Errorf("steps/tool calls/LLM calls = %d/%d/%d, want 2/1/2", result.Steps, result.ToolCalls, result.LLMCalls)
+	}
+	if result.PromptTokens != 30 || result.CompletionTokens != 5 || result.TotalTokens != 35 {
+		t.Errorf("token totals = in:%d out:%d total:%d, want 30/5/35", result.PromptTokens, result.CompletionTokens, result.TotalTokens)
+	}
+	if !result.TokenUsageComplete {
+		t.Error("expected usage to be complete when both API responses report usage")
+	}
+	if result.Duration <= 0 {
+		t.Errorf("Duration = %s, want positive", result.Duration)
+	}
+}
+
+type usageSummarizer struct {
+	usage llm.Usage
+}
+
+func (s usageSummarizer) Summarize(_ context.Context, _ []llm.Message) (string, llm.Usage, bool, error) {
+	return "prior work summary", s.usage, true, nil
+}
+
+func TestAgent_IncludesSummarizationUsageInTurnMetrics(t *testing.T) {
+	firstTool := toolCallResponse("call_1", "echo_tool", `{}`)
+	firstTool.Usage = llm.Usage{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12}
+	firstFinal := finalResponse("first done")
+	firstFinal.Usage = llm.Usage{PromptTokens: 20, CompletionTokens: 3, TotalTokens: 23}
+	secondFinal := finalResponse("second done")
+	secondFinal.Usage = llm.Usage{PromptTokens: 30, CompletionTokens: 4, TotalTokens: 34}
+	server := newScriptedServer(firstTool, firstFinal, secondFinal)
+	registry := tools.NewRegistry()
+	registry.Register(&fakeTool{name: "echo_tool", fn: func(n int, args map[string]any) *tools.ToolResult {
+		return &tools.ToolResult{Success: true, Output: "result"}
+	}})
+	a := newTestAgent(t, server, registry, func(c *config.LitegentConfig) {
+		c.ContextConfig.WindowSize = 1
+		c.ContextConfig.MaxContextTokens = 1
+	})
+	a.Context = ctxmgr.NewManager(a.Config.ContextConfig, usageSummarizer{
+		usage: llm.Usage{PromptTokens: 12, CompletionTokens: 4, TotalTokens: 16},
+	})
+
+	var secondTurn Result
+	turn := 0
+	result := a.RunInteractiveWithHistory(context.Background(), []llm.Message{{Role: llm.RoleSystem, Content: "system"}}, 0,
+		func() (string, bool) {
+			turn++
+			if turn > 2 {
+				return "", false
+			}
+			return fmt.Sprintf("task %d", turn), true
+		},
+		func(turn int, result Result) bool {
+			if turn == 2 {
+				secondTurn = result
+			}
+			return true
+		},
+	)
+	if result.Outcome != OutcomeSuccess {
+		t.Fatalf("overall Outcome = %v, err=%v", result.Outcome, result.Err)
+	}
+	if secondTurn.PromptTokens != 42 || secondTurn.CompletionTokens != 8 || secondTurn.TotalTokens != 50 {
+		t.Errorf("second turn token totals = in:%d out:%d total:%d, want 42/8/50", secondTurn.PromptTokens, secondTurn.CompletionTokens, secondTurn.TotalTokens)
+	}
+	if secondTurn.LLMCalls != 2 || !secondTurn.TokenUsageComplete {
+		t.Errorf("second-turn LLM/usage status = %d/%t, want 2/true", secondTurn.LLMCalls, secondTurn.TokenUsageComplete)
+	}
+}
+
+func TestAgent_MarksTokenUsageIncompleteWhenProviderOmitsIt(t *testing.T) {
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}`)
+	}))
+	t.Cleanup(httpServer.Close)
+	cfg := config.Default()
+	cfg.BaseURL = httpServer.URL
+	client := llm.NewClient(cfg)
+	client.MaxRetries = 0
+	logger, err := logging.New(t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = logger.Close() })
+	a := New(cfg, client, tools.NewRegistry(), ctxmgr.NewManager(cfg.ContextConfig, client), logger)
+	result := a.Run(context.Background(), "system", "task")
+	if result.TokenUsageComplete {
+		t.Fatal("expected usage to be incomplete when the provider omits usage")
 	}
 }
 
@@ -305,7 +416,7 @@ func TestAgent_Run_PreservesFinalAssistantMessageInHistory(t *testing.T) {
 		{Role: llm.RoleSystem, Content: "system"},
 		{Role: llm.RoleUser, Content: "task"},
 	}
-	updated, result := a.runTurn(context.Background(), messages, 1)
+	updated, result := a.runTurn(context.Background(), messages, 1, time.Now())
 	if result.Outcome != OutcomeSuccess {
 		t.Fatalf("Outcome = %v, want OutcomeSuccess", result.Outcome)
 	}

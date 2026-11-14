@@ -58,11 +58,17 @@ func (o Outcome) String() string {
 
 // Result is the outcome of a full agentic loop run.
 type Result struct {
-	Outcome      Outcome
-	FinalMessage string
-	Steps        int
-	TotalTokens  int
-	Err          error
+	Outcome            Outcome
+	FinalMessage       string
+	Steps              int           // agent-loop LLM requests attempted; excludes summarization
+	ToolCalls          int           // individual tool executions
+	LLMCalls           int           // agent and context-summarization requests
+	PromptTokens       int           // provider-reported input tokens, including summaries
+	CompletionTokens   int           // provider-reported output tokens, including summaries
+	TotalTokens        int           // provider-reported total tokens, including summaries
+	TokenUsageComplete bool          // false when any request did not report prompt/completion usage
+	Duration           time.Duration // time spent processing the turn; excludes interactive input wait
+	Err                error
 }
 
 // ContextStore persists the effective conversation context at safe
@@ -120,6 +126,7 @@ func (a *Agent) Run(ctx context.Context, systemPrompt, userPrompt string) Result
 // the new user prompt is appended, logged, and persisted before the first
 // LLM request.
 func (a *Agent) RunWithHistory(ctx context.Context, history []llm.Message, userPrompt string, turn int) Result {
+	started := time.Now()
 	if turn <= 0 {
 		turn = 1
 	}
@@ -127,13 +134,13 @@ func (a *Agent) RunWithHistory(ctx context.Context, history []llm.Message, userP
 	messages = append(messages, llm.Message{Role: llm.RoleUser, Content: userPrompt})
 	_ = a.Logger.LogUserPrompt(turn, userPrompt)
 	if err := a.Logger.Err(); err != nil {
-		return Result{Outcome: OutcomeStorageError, Steps: 0, Err: err}
+		return Result{Outcome: OutcomeStorageError, Duration: time.Since(started), Err: err}
 	}
 	if err := a.saveContext(turn, 0, messages); err != nil {
 		_ = a.Logger.LogTurnEnd(turn, OutcomeStorageError.String(), 0, 0)
-		return Result{Outcome: OutcomeStorageError, Steps: 0, Err: err}
+		return Result{Outcome: OutcomeStorageError, Duration: time.Since(started), Err: err}
 	}
-	_, result := a.runTurn(ctx, messages, turn)
+	_, result := a.runTurn(ctx, messages, turn, started)
 	return result
 }
 
@@ -176,11 +183,14 @@ func (a *Agent) RunInteractiveWithHistory(
 	messages := append([]llm.Message(nil), history...)
 
 	turn := startTurn
-	totalSteps := 0
-	totalTokens := 0
+	var aggregate Result
+	usageComplete := true
 	for {
 		if err := ctx.Err(); err != nil {
-			return Result{Outcome: OutcomeInterrupted, Steps: totalSteps, TotalTokens: totalTokens, Err: err}
+			aggregate.Outcome = OutcomeInterrupted
+			aggregate.TokenUsageComplete = aggregate.LLMCalls > 0 && usageComplete
+			aggregate.Err = err
+			return aggregate
 		}
 
 		prompt, ok := readPrompt()
@@ -188,31 +198,55 @@ func (a *Agent) RunInteractiveWithHistory(
 			// A prompt read that ends because the context was canceled is
 			// an interruption, not a clean EOF/exit.
 			if err := ctx.Err(); err != nil {
-				return Result{Outcome: OutcomeInterrupted, Steps: totalSteps, TotalTokens: totalTokens, Err: err}
+				aggregate.Outcome = OutcomeInterrupted
+				aggregate.TokenUsageComplete = aggregate.LLMCalls > 0 && usageComplete
+				aggregate.Err = err
+				return aggregate
 			}
-			return Result{Outcome: OutcomeSuccess, Steps: totalSteps, TotalTokens: totalTokens}
+			aggregate.Outcome = OutcomeSuccess
+			aggregate.TokenUsageComplete = aggregate.LLMCalls > 0 && usageComplete
+			return aggregate
 		}
+		turnStarted := time.Now()
 		turn++
 		_ = a.Logger.LogUserPrompt(turn, prompt)
 		if err := a.Logger.Err(); err != nil {
-			return Result{Outcome: OutcomeStorageError, Steps: totalSteps, TotalTokens: totalTokens, Err: err}
+			aggregate.Outcome = OutcomeStorageError
+			aggregate.Duration += time.Since(turnStarted)
+			aggregate.TokenUsageComplete = aggregate.LLMCalls > 0 && usageComplete
+			aggregate.Err = err
+			return aggregate
 		}
 
 		messages = append(messages, llm.Message{Role: llm.RoleUser, Content: prompt})
 		if err := a.saveContext(turn, 0, messages); err != nil {
 			_ = a.Logger.LogTurnEnd(turn, OutcomeStorageError.String(), 0, 0)
-			return Result{Outcome: OutcomeStorageError, Steps: totalSteps, TotalTokens: totalTokens, Err: err}
+			aggregate.Outcome = OutcomeStorageError
+			aggregate.Duration += time.Since(turnStarted)
+			aggregate.TokenUsageComplete = aggregate.LLMCalls > 0 && usageComplete
+			aggregate.Err = err
+			return aggregate
 		}
 
 		var result Result
-		messages, result = a.runTurn(ctx, messages, turn)
-		totalSteps += result.Steps
-		totalTokens += result.TotalTokens
+		messages, result = a.runTurn(ctx, messages, turn, turnStarted)
+		aggregate.Duration += result.Duration
+		aggregate.Steps += result.Steps
+		aggregate.ToolCalls += result.ToolCalls
+		aggregate.LLMCalls += result.LLMCalls
+		aggregate.PromptTokens += result.PromptTokens
+		aggregate.CompletionTokens += result.CompletionTokens
+		aggregate.TotalTokens += result.TotalTokens
+		if result.LLMCalls > 0 && !result.TokenUsageComplete {
+			usageComplete = false
+		}
 
 		if !onTurnResult(turn, result) {
-			result.Steps = totalSteps
-			result.TotalTokens = totalTokens
-			return result
+			aggregate.Outcome = result.Outcome
+			aggregate.FinalMessage = result.FinalMessage
+			aggregate.Err = result.Err
+			aggregate.TokenUsageComplete = aggregate.LLMCalls > 0 && usageComplete
+			return aggregate
 		}
 	}
 }
@@ -236,7 +270,7 @@ func (a *Agent) saveContext(turn, step int, messages []llm.Message) error {
 // returning the updated history (including the assistant's final answer,
 // so a subsequent turn in an interactive session sees it) alongside the
 // turn's Result. turn is used only for progress/log labeling.
-func (a *Agent) runTurn(ctx context.Context, messages []llm.Message, turn int) ([]llm.Message, Result) {
+func (a *Agent) runTurn(ctx context.Context, messages []llm.Message, turn int, started time.Time) ([]llm.Message, Result) {
 	// A stuck pattern from a previous turn must never suppress a
 	// legitimate repeated call in a new one.
 	a.lastSignature = nil
@@ -244,38 +278,68 @@ func (a *Agent) runTurn(ctx context.Context, messages []llm.Message, turn int) (
 
 	a.Progress.TurnStart(turn, a.Config.MaxSteps, len(messages))
 
-	totalTokens := 0
+	var promptTokens, completionTokens, totalTokens int
+	var steps, toolCalls, llmCalls int
+	usageComplete := true
+	resultFor := func(outcome Outcome, err error) Result {
+		return Result{
+			Outcome:            outcome,
+			Steps:              steps,
+			ToolCalls:          toolCalls,
+			LLMCalls:           llmCalls,
+			PromptTokens:       promptTokens,
+			CompletionTokens:   completionTokens,
+			TotalTokens:        totalTokens,
+			TokenUsageComplete: llmCalls > 0 && usageComplete,
+			Duration:           time.Since(started),
+			Err:                err,
+		}
+	}
+	addUsage := func(usage llm.Usage, reported bool) {
+		if !reported {
+			usageComplete = false
+			return
+		}
+		promptTokens += usage.PromptTokens
+		completionTokens += usage.CompletionTokens
+		totalTokens += usage.TotalTokens
+	}
 	step := 0
 	for ; step < a.Config.MaxSteps; step++ {
 		if err := ctx.Err(); err != nil {
 			_ = a.Logger.LogSessionError(turn, step, "interrupted: "+err.Error())
 			_ = a.Logger.LogTurnEnd(turn, OutcomeInterrupted.String(), step, totalTokens)
-			return messages, Result{Outcome: OutcomeInterrupted, Steps: step, TotalTokens: totalTokens, Err: err}
+			return messages, resultFor(OutcomeInterrupted, err)
 		}
 		if err := a.Logger.Err(); err != nil {
-			return messages, Result{Outcome: OutcomeStorageError, Steps: step, TotalTokens: totalTokens, Err: err}
+			return messages, resultFor(OutcomeStorageError, err)
 		}
 
 		if a.Config.ManageContext {
 			before := len(messages)
 			prepared, err := a.Context.Prepare(ctx, messages)
 			if err != nil {
+				usageComplete = false
 				_ = a.Logger.LogSessionError(turn, step, fmt.Sprintf("context preparation failed: %v", err))
 				_ = a.Logger.LogTurnEnd(turn, OutcomeLLMError.String(), step, totalTokens)
-				return messages, Result{Outcome: OutcomeLLMError, Steps: step, TotalTokens: totalTokens, Err: err}
+				return messages, resultFor(OutcomeLLMError, err)
+			}
+			if prepared.Summarized {
+				llmCalls++
+				addUsage(prepared.SummaryUsage, prepared.SummaryUsageReported)
 			}
 			messages = prepared.Messages
 			if prepared.Evicted > 0 {
 				_ = a.Logger.LogContextPruning(turn, step, before, len(messages), prepared.Evicted)
 			}
 			if prepared.Summarized {
-				_ = a.Logger.LogContextSummary(turn, step, prepared.Summary)
+				_ = a.Logger.LogContextSummary(turn, step, prepared.Summary, prepared.SummaryUsage, prepared.SummaryUsageReported)
 			}
 			a.Progress.ContextPruned(step, before, len(messages))
 			if prepared.Evicted > 0 || prepared.Summarized {
 				if err := a.saveContext(turn, step, messages); err != nil {
 					_ = a.Logger.LogTurnEnd(turn, OutcomeStorageError.String(), step, totalTokens)
-					return messages, Result{Outcome: OutcomeStorageError, Steps: step, TotalTokens: totalTokens, Err: err}
+					return messages, resultFor(OutcomeStorageError, err)
 				}
 			}
 		}
@@ -283,20 +347,23 @@ func (a *Agent) runTurn(ctx context.Context, messages []llm.Message, turn int) (
 		contextSHA, _ := llm.HashMessages(messages)
 		_ = a.Logger.LogLLMRequest(turn, step, len(messages), ctxmgr.EstimateTokens(messages), contextSHA)
 		reqStarted := a.Progress.Request(step, len(messages), len(a.Tools.Schemas()))
+		llmCalls++
+		steps++
 		resp, err := a.LLM.ChatCompletion(ctx, messages, a.Tools.Schemas())
 		if err != nil {
+			usageComplete = false
 			_ = a.Logger.LogSessionError(turn, step, fmt.Sprintf("LLM request failed: %v", err))
 			_ = a.Logger.LogTurnEnd(turn, OutcomeLLMError.String(), step, totalTokens)
-			return messages, Result{Outcome: OutcomeLLMError, Steps: step, TotalTokens: totalTokens, Err: err}
+			return messages, resultFor(OutcomeLLMError, err)
 		}
+		addUsage(resp.Usage, resp.UsageReported)
 		if len(resp.Choices) == 0 {
 			_ = a.Logger.LogSessionError(turn, step, "LLM response contained no choices")
 			_ = a.Logger.LogTurnEnd(turn, OutcomeLLMError.String(), step, totalTokens)
-			return messages, Result{Outcome: OutcomeLLMError, Steps: step, TotalTokens: totalTokens, Err: fmt.Errorf("empty choices in LLM response")}
+			return messages, resultFor(OutcomeLLMError, fmt.Errorf("empty choices in LLM response"))
 		}
 
 		choice := resp.Choices[0]
-		totalTokens += resp.Usage.TotalTokens
 		_ = a.Logger.LogLLMResponse(turn, step, choice.Message.Content, choice.Message.ToolCalls, resp.Usage)
 		a.Progress.Response(step, reqStarted, len(choice.Message.ToolCalls), resp.Usage.TotalTokens)
 
@@ -306,40 +373,43 @@ func (a *Agent) runTurn(ctx context.Context, messages []llm.Message, turn int) (
 			messages = append(messages, choice.Message)
 			if err := a.saveContext(turn, step, messages); err != nil {
 				_ = a.Logger.LogTurnEnd(turn, OutcomeStorageError.String(), step+1, totalTokens)
-				return messages, Result{Outcome: OutcomeStorageError, Steps: step + 1, TotalTokens: totalTokens, Err: err}
+				return messages, resultFor(OutcomeStorageError, err)
 			}
 			_ = a.Logger.LogFinish(turn, step, choice.Message.Content, step+1, totalTokens)
 			_ = a.Logger.LogTurnEnd(turn, OutcomeSuccess.String(), step+1, totalTokens)
 			a.Progress.TurnEnd(turn, OutcomeSuccess.String(), step+1)
 			if err := a.Logger.Err(); err != nil {
-				return messages, Result{Outcome: OutcomeStorageError, Steps: step + 1, TotalTokens: totalTokens, Err: err}
+				return messages, resultFor(OutcomeStorageError, err)
 			}
-			return messages, Result{Outcome: OutcomeSuccess, FinalMessage: choice.Message.Content, Steps: step + 1, TotalTokens: totalTokens}
+			result := resultFor(OutcomeSuccess, nil)
+			result.FinalMessage = choice.Message.Content
+			return messages, result
 		}
 
 		messages = append(messages, choice.Message)
 
 		for _, call := range choice.Message.ToolCalls {
+			toolCalls++
 			toolMsg := a.dispatchToolCall(ctx, turn, step, call)
 			messages = append(messages, toolMsg)
 		}
 		if err := a.saveContext(turn, step, messages); err != nil {
 			_ = a.Logger.LogTurnEnd(turn, OutcomeStorageError.String(), step+1, totalTokens)
-			return messages, Result{Outcome: OutcomeStorageError, Steps: step + 1, TotalTokens: totalTokens, Err: err}
+			return messages, resultFor(OutcomeStorageError, err)
 		}
 	}
 
 	if err := a.saveContext(turn, step, messages); err != nil {
 		_ = a.Logger.LogTurnEnd(turn, OutcomeStorageError.String(), step, totalTokens)
-		return messages, Result{Outcome: OutcomeStorageError, Steps: step, TotalTokens: totalTokens, Err: err}
+		return messages, resultFor(OutcomeStorageError, err)
 	}
 	_ = a.Logger.LogSessionError(turn, step, fmt.Sprintf("max_steps (%d) exceeded without a final response", a.Config.MaxSteps))
 	_ = a.Logger.LogTurnEnd(turn, OutcomeMaxStepsExceeded.String(), step, totalTokens)
 	a.Progress.TurnEnd(turn, OutcomeMaxStepsExceeded.String(), step)
 	if err := a.Logger.Err(); err != nil {
-		return messages, Result{Outcome: OutcomeStorageError, Steps: step, TotalTokens: totalTokens, Err: err}
+		return messages, resultFor(OutcomeStorageError, err)
 	}
-	return messages, Result{Outcome: OutcomeMaxStepsExceeded, Steps: step, TotalTokens: totalTokens}
+	return messages, resultFor(OutcomeMaxStepsExceeded, nil)
 }
 
 // dispatchToolCall executes a single tool call, applies the loop guard

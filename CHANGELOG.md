@@ -116,6 +116,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Successful turn separators now include agent steps, individual tool-call
+  count, prompt-to-completion duration, and provider-reported input/output
+  token totals. Unsuccessful turns report their outcome and metrics on stderr
+  without the success separator; max-step output shows the configured limit.
+- Token totals include context-summarization calls. When a provider omits usage
+  for any LLM call in a turn, displayed input/output totals are `n/a` rather
+  than misleading zeros.
+- `steps` is the number of normal agent-loop LLM requests attempted;
+  summarization requests are included in token totals but not in `steps`.
+
 - Raised `max_context_tokens` from `16000` to `32000`.
 - Raised `window_size` from `20` to `40`.
 - `window_size` is now explicitly documented and tested as a count of

@@ -84,7 +84,15 @@ Without a resume flag, every invocation creates a new session. Use `-r` or `--re
 
 ### Output
 
-On success, the agent's final response is printed to stdout followed by a `----====----` separator line — in single-shot and interactive mode alike. At startup Litegent always prints the active session and directory to stderr, for example:
+On success, the agent's final response is printed to stdout followed by a separator with per-turn metrics, in single-shot and interactive mode alike:
+
+```text
+----====---- | steps=11/30 | tool_calls=4 | duration=02m11.234s | tokens_in=18,420 | tokens_out=1,306
+```
+
+`steps` counts normal agent-loop LLM requests attempted (not individual tools); `tool_calls` counts tool executions. Duration starts when the prompt is accepted and excludes time waiting for interactive input. Token values sum provider-reported prompt/completion usage for both agent requests and context summarization; they display as `n/a` if any LLM call did not report usage. A turn that reaches `max_steps` does not get a success separator; its outcome and metrics are printed to stderr.
+
+At startup Litegent always prints the active session and directory to stderr, for example:
 
 ```text
 litegent: session brave-otter-runs (/home/user/.litegent/brave-otter-runs)
@@ -219,7 +227,7 @@ Pass `-i` instead of `-p` to start a persistent, multi-turn session instead of a
 litegent -s examples/roles/software_engineer.txt -i -c examples/config.json
 ```
 Litegent prints a `> ` prompt on stderr and reads one line at a time from stdin:
-- Each non-blank line starts a new turn; Litegent runs it to completion and prints the final response to stdout, followed by a `----====----` separator line, before prompting again — so turn boundaries are always visually clear.
+- Each non-blank line starts a new turn; Litegent runs it to completion and prints the final response followed by the separator/metrics line shown in Section 3, before prompting again — so turn boundaries and costs are visible.
 - While a turn runs, every tool invocation prints a compact one-line notice to stderr so you can see the agent working:
   ```text
   |ToolCall : bash map[command:go test ./...]

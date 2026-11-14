@@ -489,18 +489,22 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 	switch result.Outcome {
 	case agent.OutcomeSuccess:
 		fmt.Fprintln(stdout, result.FinalMessage)
-		fmt.Fprintln(stdout, turnSeparator)
+		writeSuccessfulTurnFooter(stdout, result, cfg.MaxSteps)
 	case agent.OutcomeMaxStepsExceeded:
 		fmt.Fprintf(stderr, "litegent: max_steps (%d) exceeded without a final response\n", cfg.MaxSteps)
+		writeTurnStats(stderr, "litegent: turn ended", result, cfg.MaxSteps)
 		exitCode = ExitMaxStepsExceeded
 	case agent.OutcomeInterrupted:
 		fmt.Fprintln(stderr, "litegent: interrupted")
+		writeTurnStats(stderr, "litegent: turn interrupted", result, cfg.MaxSteps)
 		exitCode = ExitInterrupted
 	case agent.OutcomeStorageError:
 		fmt.Fprintf(stderr, "litegent: storage error: %v\n", result.Err)
+		writeTurnStats(stderr, "litegent: turn ended", result, cfg.MaxSteps)
 		exitCode = ExitConfigOrCLIError
 	default: // agent.OutcomeLLMError and any unforeseen outcome
 		fmt.Fprintf(stderr, "litegent: fatal LLM error: %v\n", result.Err)
+		writeTurnStats(stderr, "litegent: turn ended", result, cfg.MaxSteps)
 		exitCode = ExitLLMAPIError
 	}
 	return finalizeRun(sess, logger, result.Outcome.String(), exitCode, result.Steps, result.TotalTokens, stderr)
@@ -554,20 +558,24 @@ func runInteractive(ctx context.Context, ag *agent.Agent, history []llm.Message,
 		case agent.OutcomeSuccess:
 			_ = session.SetTurnCount(sess, turn)
 			fmt.Fprintln(stdout, result.FinalMessage)
-			fmt.Fprintln(stdout, turnSeparator)
+			writeSuccessfulTurnFooter(stdout, result, cfg.MaxSteps)
 			return true
 		case agent.OutcomeMaxStepsExceeded:
 			_ = session.SetTurnCount(sess, turn)
 			fmt.Fprintf(stderr, "litegent: turn %d: max_steps (%d) exceeded without a final response\n", turn, cfg.MaxSteps)
+			writeTurnStats(stderr, fmt.Sprintf("litegent: turn %d ended", turn), result, cfg.MaxSteps)
 			return true // the session continues; the user can try a different approach
 		case agent.OutcomeInterrupted:
 			fmt.Fprintln(stderr, "litegent: interrupted")
+			writeTurnStats(stderr, fmt.Sprintf("litegent: turn %d interrupted", turn), result, cfg.MaxSteps)
 			return false
 		case agent.OutcomeStorageError:
 			fmt.Fprintf(stderr, "litegent: turn %d: storage error: %v\n", turn, result.Err)
+			writeTurnStats(stderr, fmt.Sprintf("litegent: turn %d ended", turn), result, cfg.MaxSteps)
 			return false
 		default: // agent.OutcomeLLMError and any unforeseen outcome
 			fmt.Fprintf(stderr, "litegent: turn %d: fatal LLM error: %v\n", turn, result.Err)
+			writeTurnStats(stderr, fmt.Sprintf("litegent: turn %d ended", turn), result, cfg.MaxSteps)
 			return false // a fatal LLM error isn't recoverable mid-session
 		}
 	}
@@ -587,6 +595,54 @@ func runInteractive(ctx context.Context, ag *agent.Agent, history []llm.Message,
 		exitCode = ExitSuccess
 	}
 	return finalizeRun(sess, logger, result.Outcome.String(), exitCode, result.Steps, result.TotalTokens, stderr)
+}
+
+// writeSuccessfulTurnFooter preserves the separator prefix while adding
+// per-turn metrics for humans and simple output parsers.
+func writeSuccessfulTurnFooter(w io.Writer, result agent.Result, maxSteps int) {
+	fmt.Fprintf(w, "%s | %s\n", turnSeparator, formatTurnStats(result, maxSteps))
+}
+
+// writeTurnStats reports metrics for turns that did not end successfully.
+// These go to stderr so unsuccessful turns never emit the success marker.
+func writeTurnStats(w io.Writer, prefix string, result agent.Result, maxSteps int) {
+	fmt.Fprintf(w, "%s | outcome=%s | %s\n", prefix, result.Outcome.String(), formatTurnStats(result, maxSteps))
+}
+
+func formatTurnStats(result agent.Result, maxSteps int) string {
+	inTokens, outTokens := "n/a", "n/a"
+	if result.TokenUsageComplete {
+		inTokens = formatCount(result.PromptTokens)
+		outTokens = formatCount(result.CompletionTokens)
+	}
+	return fmt.Sprintf(
+		"steps=%d/%d | tool_calls=%d | duration=%s | tokens_in=%s | tokens_out=%s",
+		result.Steps,
+		maxSteps,
+		result.ToolCalls,
+		result.Duration.Round(time.Millisecond),
+		inTokens,
+		outTokens,
+	)
+}
+
+func formatCount(n int) string {
+	s := fmt.Sprintf("%d", n)
+	if n < 0 {
+		return s
+	}
+	first := len(s) % 3
+	if first == 0 {
+		first = 3
+	}
+	var b strings.Builder
+	b.Grow(len(s) + len(s)/3)
+	b.WriteString(s[:first])
+	for i := first; i < len(s); i += 3 {
+		b.WriteByte(',')
+		b.WriteString(s[i : i+3])
+	}
+	return b.String()
 }
 
 // buildRegistry registers the enabled built-in tools per cfg.Tools. All

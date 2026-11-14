@@ -79,6 +79,34 @@ func TestChatCompletion_RetriesOn500ThenSucceeds(t *testing.T) {
 	}
 }
 
+func TestChatResponseUsageReportedDistinguishesMissingAndPartialUsage(t *testing.T) {
+	var withUsage, withoutUsage, partialUsage, noTotal ChatResponse
+	if err := json.Unmarshal([]byte(`{"choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`), &withUsage); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(`{"choices":[]}`), &withoutUsage); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(`{"choices":[],"usage":{"prompt_tokens":4}}`), &partialUsage); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(`{"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":3}}`), &noTotal); err != nil {
+		t.Fatal(err)
+	}
+	if !withUsage.UsageReported {
+		t.Error("explicit zero-valued usage object must be marked reported")
+	}
+	if withoutUsage.UsageReported {
+		t.Error("omitted usage object must not be marked reported")
+	}
+	if partialUsage.UsageReported {
+		t.Error("partial usage object must not be marked complete")
+	}
+	if !noTotal.UsageReported || noTotal.Usage.TotalTokens != 7 {
+		t.Errorf("usage without total_tokens = %+v reported=%t, want total 7 and reported", noTotal.Usage, noTotal.UsageReported)
+	}
+}
+
 func TestChatCompletion_AuthErrorFailsImmediately(t *testing.T) {
 	var calls int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -305,16 +333,22 @@ func TestSummarize(t *testing.T) {
 		if !strings.Contains(req.Messages[1].Content, "did a thing") {
 			t.Errorf("expected transcript to include evicted message content, got: %q", req.Messages[1].Content)
 		}
-		json.NewEncoder(w).Encode(ChatResponse{Choices: []Choice{{Message: Message{Role: RoleAssistant, Content: "Agent did a thing successfully."}}}})
+		json.NewEncoder(w).Encode(ChatResponse{
+			Choices: []Choice{{Message: Message{Role: RoleAssistant, Content: "Agent did a thing successfully."}}},
+			Usage:   Usage{PromptTokens: 8, CompletionTokens: 3, TotalTokens: 11},
+		})
 	}))
 	defer server.Close()
 
 	c := newTestClient(t, server)
-	summary, err := c.Summarize(context.Background(), []Message{{Role: RoleTool, Content: "did a thing"}})
+	summary, usage, reported, err := c.Summarize(context.Background(), []Message{{Role: RoleTool, Content: "did a thing"}})
 	if err != nil {
 		t.Fatalf("Summarize returned error: %v", err)
 	}
 	if summary == "" {
 		t.Fatal("expected non-empty summary")
+	}
+	if !reported || usage.PromptTokens != 8 || usage.CompletionTokens != 3 || usage.TotalTokens != 11 {
+		t.Errorf("summarization usage = %+v reported=%t, want 8/3/11 and reported", usage, reported)
 	}
 }

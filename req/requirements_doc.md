@@ -255,8 +255,10 @@ Litegent shall provide native Go implementations of the following core tools:
 - **FR-7.4: Blank Input**  
   An empty line must simply re-prompt without starting a turn or contacting the LLM.
 
-- **FR-7.5: Turn Visibility (Separators & Tool-Call Notices)**  
-  - Every successful final response must be followed on stdout by the separator line `----====----`, in both single-shot and interactive mode, so turn boundaries are visually unambiguous. The separator is presentation only and must never be added to conversation history.
+- **FR-7.5: Turn Visibility (Separators, Metrics & Tool-Call Notices)**
+  - Every successful final response must be followed on stdout by a `----====----` separator containing agent-loop steps, tool-call count, prompt-to-completion duration, and provider-reported input/output token totals, in both single-shot and interactive mode, so turn boundaries and usage are visible. The footer is presentation only and must never be added to conversation history.
+  - Token totals must include agent and context-summarization LLM calls. If the provider omits usage for any call, display `n/a` rather than a misleading zero.
+  - A turn that ends without a successful final answer must report its outcome and available metrics to stderr, without emitting the success separator. A max-step outcome must clearly show `steps=max_steps/max_steps`.
   - In interactive sessions without `-v`, each tool invocation must emit exactly one compact stderr line of the form `|ToolCall : <first line of the tool request>` (tool name plus decoded arguments), produced by masking configured secrets first, then truncating to the first physical line, then clipping to 240 characters — so truncation can never defeat secret masking. The notice is suppressed under `-v`, where the richer per-tool progress line already reports the call.
 
 ---

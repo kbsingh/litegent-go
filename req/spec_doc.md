@@ -123,7 +123,7 @@ Once the config is loaded, `top_dir` governs system prompt, skills, sessions, lo
 - A blank line (after trimming whitespace) re-prompts without starting a turn or contacting the LLM.
 - A line that trims to `/exit` or `/quit` (case-insensitive) ends the session cleanly.
 - Any other non-blank line becomes that turn's prompt, passed to `agent.Agent.RunInteractive` (2.8).
-- After each turn, the turn's `Result` is handled by an `onTurnResult` callback: `OutcomeSuccess` prints `FinalMessage` to stdout, followed by the `----====----` turn separator, and continues; `OutcomeMaxStepsExceeded` reports to stderr and continues; `OutcomeInterrupted`, `OutcomeStorageError`, and `OutcomeLLMError` print to stderr and end the session (return `false` from the callback).
+- After each turn, the turn's `Result` is handled by an `onTurnResult` callback: `OutcomeSuccess` prints `FinalMessage` to stdout, followed by `----====---- | steps=<n>/<max> | tool_calls=<n> | duration=<elapsed> | tokens_in=<n|n/a> | tokens_out=<n|n/a>`, and continues; unsuccessful turn outcomes report the same metrics to stderr without the success separator. `OutcomeMaxStepsExceeded` continues the interactive session; `OutcomeInterrupted`, `OutcomeStorageError`, and `OutcomeLLMError` end it.
 - The CLI-level exit code is `ExitInterrupted` for `OutcomeInterrupted`, `ExitLLMAPIError` for `OutcomeLLMError`, `ExitConfigOrCLIError` for `OutcomeStorageError`, and `ExitSuccess` for everything else (including a session that ended after one or more turns hit `OutcomeMaxStepsExceeded`, since the session itself still ended cleanly via `/exit`/EOF).
 
 ##### 2.1.2 Progress Reporting (`-v`, `internal/progress`)
@@ -331,7 +331,7 @@ The two are the thinking/reasoning wire shapes, selected by `thinking_format` (`
 - `401`/`403` responses return an `*APIError` immediately, with **no** retry.
 - Other `4xx`/non-retryable responses also return an `*APIError` immediately.
 - Backoff between retries: `delay = 500ms * 2^(attempt-1)`, capped at `10s`, plus up to 25% random jitter (`backoffDelay(attempt int) time.Duration`); the wait is interruptible via `ctx.Done()`.
-- `Summarize(ctx, messages []Message) (string, error)` is a thin wrapper around `ChatCompletion` with a fixed system instruction ("Summarize the following agent conversation history concisely...") and the evicted messages flattened into one user message; it implements `ctxmgr.Summarizer` and is what `internal/ctxmgr` calls for Stage 3 (2.5).
+- `Summarize(ctx, messages []Message) (string, Usage, bool, error)` is a thin wrapper around `ChatCompletion` with a fixed system instruction ("Summarize the following agent conversation history concisely...") and the evicted messages flattened into one user message. It returns provider usage and whether usage was included in the response, implements `ctxmgr.Summarizer`, and is what `internal/ctxmgr` calls for Stage 3 (2.5).
 
 ---
 
@@ -534,7 +534,7 @@ Named `ctxmgr` (not `context`) to avoid shadowing the standard library's `contex
 
 ```go
 type Summarizer interface {
-    Summarize(ctx context.Context, messages []llm.Message) (string, error)
+    Summarize(ctx context.Context, messages []llm.Message) (string, llm.Usage, bool, error)
 }
 
 type Manager struct {
@@ -575,10 +575,12 @@ This stage only runs when `manage_context && truncate_tool_outputs`. If `m.cfg.M
 #### Stage 2 & 3 — `(m *Manager) Prepare(ctx context.Context, messages []llm.Message) (PrepareResult, error)`
 ```go
 type PrepareResult struct {
-    Messages   []llm.Message
-    Evicted    int
-    Summarized bool
-    Summary    string
+    Messages             []llm.Message
+    Evicted              int
+    Summarized           bool
+    Summary              string
+    SummaryUsage         llm.Usage
+    SummaryUsageReported bool
 }
 ```
 Message layout: `messages[0]` = system prompt (permanent), `messages[1]` = the first user message in the conversation — single-shot mode's `-p` content, or interactive mode's first turn (permanent), an optional `messages[2]` = `<context_summary>` (role `llm.RoleSummary`), and everything after that is active dialogue subject to pruning.
@@ -695,12 +697,26 @@ const (
 func (o Outcome) String() string // "success" | "max_steps_exceeded" | "llm_error" | "interrupted" | "storage_error" | "unknown"
 
 type Result struct {
-    Outcome      Outcome
-    FinalMessage string // only meaningful when Outcome == OutcomeSuccess
-    Steps        int
-    TotalTokens  int
-    Err          error  // populated for error outcomes
+    Outcome            Outcome
+    FinalMessage       string // only meaningful when Outcome == OutcomeSuccess
+    Steps              int    // agent-loop LLM requests attempted; excludes summarization calls
+    ToolCalls          int    // individual tool executions
+    LLMCalls           int    // agent requests plus context-summarization requests
+    PromptTokens       int
+    CompletionTokens   int
+    TotalTokens        int
+    TokenUsageComplete bool   // false if any LLM call did not report usage
+    Duration           time.Duration // prompt accepted through turn completion; excludes input wait
+    Err                error  // populated for error outcomes
 }
+
+Successful turn output appends a summary to the separator, for example:
+
+```text
+----====---- | steps=11/30 | tool_calls=4 | duration=2m11.234s | tokens_in=18,420 | tokens_out=1,306
+```
+
+The duration starts when the prompt is accepted and excludes time waiting for interactive input. Token counts sum provider-reported prompt/completion usage across agent and summarization calls; if any call omits usage, both displayed counts are `n/a`. Unsuccessful turn metrics are written to stderr and never receive the success separator. `steps` counts agent-loop requests, while `LLMCalls` includes summarization calls.
 
 type ContextStore interface {
     SaveContext(messages []llm.Message) error

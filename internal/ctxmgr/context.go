@@ -21,7 +21,7 @@ import (
 // messages. internal/llm.Client implements this via a sub-call to the
 // configured LLM; tests can supply a fake.
 type Summarizer interface {
-	Summarize(ctx context.Context, messages []llm.Message) (string, error)
+	Summarize(ctx context.Context, messages []llm.Message) (string, llm.Usage, bool, error)
 }
 
 // Manager applies the three-stage context management pipeline described
@@ -101,10 +101,12 @@ const (
 
 // PrepareResult describes the outcome of one context-preparation pass.
 type PrepareResult struct {
-	Messages   []llm.Message
-	Evicted    int
-	Summarized bool
-	Summary    string
+	Messages             []llm.Message
+	Evicted              int
+	Summarized           bool
+	Summary              string
+	SummaryUsage         llm.Usage
+	SummaryUsageReported bool
 }
 
 // Prepare runs Stage 2 (sliding window pruning) and, when a summarizer is
@@ -128,6 +130,8 @@ func (m *Manager) Prepare(ctx context.Context, messages []llm.Message) (PrepareR
 	evictedTotal := 0
 	summarized := false
 	summaryText := ""
+	var summaryUsage llm.Usage
+	summaryUsageReported := false
 
 	evictedCount := evictionCount(active, m.cfg.WindowSize)
 	if evictedCount > 0 {
@@ -149,13 +153,15 @@ func (m *Manager) Prepare(ctx context.Context, messages []llm.Message) (PrepareR
 				// turns so context is never silently lost.
 				toSummarize = append([]llm.Message{*summary}, evicted...)
 			}
-			text, err := m.summarizer.Summarize(ctx, toSummarize)
+			text, usage, usageReported, err := m.summarizer.Summarize(ctx, toSummarize)
 			if err != nil {
 				return PrepareResult{}, fmt.Errorf("summarizing evicted context: %w", err)
 			}
 			summary = &llm.Message{Role: llm.RoleSummary, Content: text}
 			summarized = true
 			summaryText = text
+			summaryUsage = usage
+			summaryUsageReported = usageReported
 		}
 		active = kept
 	}
@@ -167,10 +173,12 @@ func (m *Manager) Prepare(ctx context.Context, messages []llm.Message) (PrepareR
 	}
 	result = append(result, active...)
 	return PrepareResult{
-		Messages:   result,
-		Evicted:    evictedTotal,
-		Summarized: summarized,
-		Summary:    summaryText,
+		Messages:             result,
+		Evicted:              evictedTotal,
+		Summarized:           summarized,
+		Summary:              summaryText,
+		SummaryUsage:         summaryUsage,
+		SummaryUsageReported: summaryUsageReported,
 	}, nil
 }
 

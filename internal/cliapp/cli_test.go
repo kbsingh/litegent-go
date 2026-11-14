@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"litegent/internal/agent"
 	"litegent/internal/llm"
 	"litegent/internal/logging"
 	"litegent/internal/session"
@@ -378,8 +379,8 @@ func TestRun_EndToEndSuccess(t *testing.T) {
 	if !strings.Contains(stdout.String(), "All done.") {
 		t.Errorf("expected final message on stdout, got: %q", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "All done.\n----====----\n") {
-		t.Errorf("expected turn separator after the final message, got: %q", stdout.String())
+	if !strings.Contains(stdout.String(), "All done.\n----====---- | steps=2/5 | tool_calls=1 | duration=") {
+		t.Errorf("expected turn separator and metrics after the final message, got: %q", stdout.String())
 	}
 
 	assertRunLogs(t, dir)
@@ -585,8 +586,8 @@ func TestRun_InteractiveToolCallNotices(t *testing.T) {
 	if !strings.Contains(stderr, "|ToolCall : bash") || !strings.Contains(stderr, "notice-check") {
 		t.Errorf("expected compact tool-call notice on stderr, got: %q", stderr)
 	}
-	if !strings.Contains(stdout, "turn done\n----====----\n") {
-		t.Errorf("expected reply followed by turn separator, got: %q", stdout)
+	if !strings.Contains(stdout, "turn done\n----====---- | steps=2/30 | tool_calls=1 | duration=") {
+		t.Errorf("expected reply followed by turn separator and metrics, got: %q", stdout)
 	}
 
 	stdout, stderr = run(true)
@@ -596,8 +597,8 @@ func TestRun_InteractiveToolCallNotices(t *testing.T) {
 	if !strings.Contains(stderr, "[step 0] tool bash") {
 		t.Errorf("verbose tool line missing under -v, got: %q", stderr)
 	}
-	if !strings.Contains(stdout, "turn done\n----====----\n") {
-		t.Errorf("expected reply followed by turn separator under -v, got: %q", stdout)
+	if !strings.Contains(stdout, "turn done\n----====---- | steps=2/30 | tool_calls=1 | duration=") {
+		t.Errorf("expected reply followed by turn separator and metrics under -v, got: %q", stdout)
 	}
 }
 
@@ -1229,5 +1230,84 @@ func TestRun_TruncatedToolOutputUsesSessionSpool(t *testing.T) {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("session log missing %q", want)
 		}
+	}
+}
+
+func TestRun_MaxStepsPrintsTurnMetricsWithoutSuccessSeparator(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(llm.ChatResponse{
+			Choices: []llm.Choice{{
+				Message: llm.Message{
+					Role: llm.RoleAssistant,
+					ToolCalls: []llm.ToolCall{{
+						ID: "call_1", Type: "function",
+						Function: llm.FunctionCall{Name: "bash", Arguments: `{"command":"echo max-step-test"}`},
+					}},
+				},
+				FinishReason: "tool_calls",
+			}},
+			Usage: llm.Usage{PromptTokens: 7, CompletionTokens: 3, TotalTokens: 10},
+		})
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	promptPath := writeFile(t, dir, "prompt.txt", "task")
+	cfgPath := writeFile(t, dir, "config.json", `{
+  "base_url": "`+server.URL+`",
+  "model": "test-model",
+  "max_steps": 1
+}`)
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"-p", promptPath, "-c", cfgPath}, strings.NewReader(""), &stdout, &stderr)
+	if code != ExitMaxStepsExceeded {
+		t.Fatalf("exit code = %d, want %d; stderr=%s", code, ExitMaxStepsExceeded, stderr.String())
+	}
+	if strings.Contains(stdout.String(), turnSeparator) {
+		t.Errorf("max-steps outcome must not print success separator: %q", stdout.String())
+	}
+	for _, want := range []string{
+		"outcome=max_steps_exceeded",
+		"steps=1/1",
+		"tool_calls=1",
+		"tokens_in=7",
+		"tokens_out=3",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr metrics missing %q: %q", want, stderr.String())
+		}
+	}
+}
+
+func TestFormatTurnStatsMarksUnreportedUsage(t *testing.T) {
+	got := formatTurnStats(agent.Result{
+		Steps:     30,
+		ToolCalls: 12,
+		Duration:  2*time.Minute + 3*time.Second,
+	}, 30)
+	for _, want := range []string{
+		"steps=30/30",
+		"tool_calls=12",
+		"duration=2m3s",
+		"tokens_in=n/a",
+		"tokens_out=n/a",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("formatted stats missing %q: %q", want, got)
+		}
+	}
+}
+
+func TestFormatCountGroupsThousands(t *testing.T) {
+	if got := formatCount(18420); got != "18,420" {
+		t.Errorf("formatCount(18420) = %q, want 18,420", got)
+	}
+}
+
+func TestFormatTurnStatsShowsUnavailableUsage(t *testing.T) {
+	got := formatTurnStats(agent.Result{Steps: 1, Duration: time.Second}, 30)
+	if !strings.Contains(got, "tokens_in=n/a") || !strings.Contains(got, "tokens_out=n/a") {
+		t.Errorf("unreported token usage should be n/a, got %q", got)
 	}
 }

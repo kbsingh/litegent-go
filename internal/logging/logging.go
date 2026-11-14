@@ -423,12 +423,28 @@ func (l *Logger) LogContextPruning(turn, step, before, after, evicted int) error
 	))
 }
 
-// LogContextSummary records a newly produced context summary.
-func (l *Logger) LogContextSummary(turn, step int, summary string) error {
-	if err := l.logTrace(turn, EventContextSummary, step, map[string]any{"summary": summary}); err != nil {
+// LogContextSummary records a newly produced context summary and the
+// provider-reported usage for its summarization request.
+func (l *Logger) LogContextSummary(turn, step int, summary string, usage llm.Usage, usageReported bool) error {
+	data := map[string]any{
+		"summary":        summary,
+		"usage_reported": usageReported,
+	}
+	if usageReported {
+		data["prompt_tokens"] = usage.PromptTokens
+		data["completion_tokens"] = usage.CompletionTokens
+		data["total_tokens"] = usage.TotalTokens
+	}
+	if err := l.logTrace(turn, EventContextSummary, step, data); err != nil {
 		return err
 	}
-	return l.writeBlock(fmt.Sprintf("TURN %d STEP %d | CONTEXT SUMMARY", turn, step), summary)
+	header := fmt.Sprintf("TURN %d STEP %d | CONTEXT SUMMARY", turn, step)
+	if usageReported {
+		header += fmt.Sprintf(" | tokens_in=%d tokens_out=%d", usage.PromptTokens, usage.CompletionTokens)
+	} else {
+		header += " | tokens=n/a"
+	}
+	return l.writeBlock(header, summary)
 }
 
 // LogLoopGuardTriggered records that the repeated tool-call guard fired.

@@ -131,18 +131,20 @@ func TestPrepare_SlidingWindowPrunesOldestTurns(t *testing.T) {
 }
 
 type fakeSummarizer struct {
-	called   bool
-	received []llm.Message
+	called        bool
+	received      []llm.Message
+	usage         llm.Usage
+	usageReported bool
 }
 
-func (f *fakeSummarizer) Summarize(_ context.Context, messages []llm.Message) (string, error) {
+func (f *fakeSummarizer) Summarize(_ context.Context, messages []llm.Message) (string, llm.Usage, bool, error) {
 	f.called = true
 	f.received = messages
-	return "summary text", nil
+	return "summary text", f.usage, f.usageReported, nil
 }
 
 func TestPrepare_SummarizesEvictedTurns(t *testing.T) {
-	fs := &fakeSummarizer{}
+	fs := &fakeSummarizer{usage: llm.Usage{PromptTokens: 12, CompletionTokens: 4, TotalTokens: 16}, usageReported: true}
 	m := NewManager(config.ContextConfig{WindowSize: 2}, fs)
 	messages := []llm.Message{
 		{Role: llm.RoleSystem, Content: "sys"},
@@ -165,6 +167,9 @@ func TestPrepare_SummarizesEvictedTurns(t *testing.T) {
 	}
 	if !res.Summarized || res.Summary != "summary text" || res.Evicted != 2 {
 		t.Errorf("summary metadata = %+v", res)
+	}
+	if !res.SummaryUsageReported || res.SummaryUsage != fs.usage {
+		t.Errorf("summary usage = %+v reported=%t, want %+v reported", res.SummaryUsage, res.SummaryUsageReported, fs.usage)
 	}
 }
 

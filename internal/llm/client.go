@@ -123,10 +123,44 @@ type Usage struct {
 
 // ChatResponse is the response body from POST /chat/completions.
 type ChatResponse struct {
-	ID      string   `json:"id"`
-	Model   string   `json:"model"`
-	Choices []Choice `json:"choices"`
-	Usage   Usage    `json:"usage"`
+	ID            string   `json:"id"`
+	Model         string   `json:"model"`
+	Choices       []Choice `json:"choices"`
+	Usage         Usage    `json:"usage"`
+	UsageReported bool     `json:"-"` // true when prompt and completion counts were both reported
+}
+
+// UnmarshalJSON preserves whether the provider reported both prompt and
+// completion usage. Zero token counts are valid values, so callers must
+// distinguish explicit zeroes from omitted fields before deciding whether
+// to display numeric totals or "n/a".
+func (r *ChatResponse) UnmarshalJSON(data []byte) error {
+	type responseAlias ChatResponse
+	var decoded responseAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	usage, ok := fields["usage"]
+	*r = ChatResponse(decoded)
+	if ok && !bytes.Equal(bytes.TrimSpace(usage), []byte("null")) {
+		var usageFields map[string]json.RawMessage
+		if err := json.Unmarshal(usage, &usageFields); err != nil {
+			return err
+		}
+		_, hasPrompt := usageFields["prompt_tokens"]
+		_, hasCompletion := usageFields["completion_tokens"]
+		r.UsageReported = hasPrompt && hasCompletion
+		if r.UsageReported {
+			if _, hasTotal := usageFields["total_tokens"]; !hasTotal {
+				r.Usage.TotalTokens = r.Usage.PromptTokens + r.Usage.CompletionTokens
+			}
+		}
+	}
+	return nil
 }
 
 // APIError represents a non-retryable error response from the LLM
@@ -301,7 +335,7 @@ func backoffDelay(attempt int) time.Duration {
 
 // Summarize implements ctxmgr.Summarizer by asking the model to condense
 // evicted conversation history into a short paragraph.
-func (c *Client) Summarize(ctx context.Context, messages []Message) (string, error) {
+func (c *Client) Summarize(ctx context.Context, messages []Message) (string, Usage, bool, error) {
 	var transcript strings.Builder
 	for _, m := range messages {
 		fmt.Fprintf(&transcript, "[%s] %s\n", m.Role, m.Content)
@@ -314,10 +348,10 @@ func (c *Client) Summarize(ctx context.Context, messages []Message) (string, err
 
 	resp, err := c.ChatCompletion(ctx, prompt, nil)
 	if err != nil {
-		return "", fmt.Errorf("summarization request failed: %w", err)
+		return "", Usage{}, false, fmt.Errorf("summarization request failed: %w", err)
 	}
 	if len(resp.Choices) == 0 {
-		return "", fmt.Errorf("summarization response contained no choices")
+		return "", Usage{}, resp.UsageReported, fmt.Errorf("summarization response contained no choices")
 	}
-	return resp.Choices[0].Message.Content, nil
+	return resp.Choices[0].Message.Content, resp.Usage, resp.UsageReported, nil
 }
