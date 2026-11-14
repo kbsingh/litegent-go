@@ -681,3 +681,55 @@ func TestRun_CustomTopDirHonorsConfig(t *testing.T) {
 	}
 	assertRunLogs(t, top)
 }
+
+func TestRun_CreatesSessionLayout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(llm.ChatResponse{
+			Choices: []llm.Choice{{Message: llm.Message{Role: llm.RoleAssistant, Content: "done"}, FinishReason: "stop"}},
+		})
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	promptPath := writeFile(t, dir, "prompt.txt", "task")
+	cfgPath := writeFile(t, dir, "config.json", `{
+  "base_url": "`+server.URL+`",
+  "model": "test-model"
+}`)
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"-p", promptPath, "-c", cfgPath}, strings.NewReader(""), &stdout, &stderr)
+	if code != ExitSuccess {
+		t.Fatalf("exit code = %d, want %d, stderr: %s", code, ExitSuccess, stderr.String())
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sessionDir string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(dir, e.Name(), "session.json")); err == nil {
+			sessionDir = filepath.Join(dir, e.Name())
+			break
+		}
+	}
+	if sessionDir == "" {
+		t.Fatalf("expected a session directory under %s, entries: %v", dir, entries)
+	}
+	if !strings.Contains(stderr.String(), "litegent: session "+filepath.Base(sessionDir)) {
+		t.Errorf("startup output missing session id, got: %q", stderr.String())
+	}
+	for _, path := range []string{
+		filepath.Join(sessionDir, "session.json"),
+		filepath.Join(sessionDir, "logs"),
+		filepath.Join(sessionDir, "spool"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("expected %s: %v", path, err)
+		}
+	}
+}

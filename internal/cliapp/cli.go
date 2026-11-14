@@ -29,6 +29,7 @@ import (
 	"litegent/internal/llm"
 	"litegent/internal/logging"
 	"litegent/internal/progress"
+	"litegent/internal/session"
 	"litegent/internal/skills"
 	"litegent/internal/tools"
 	"litegent/internal/version"
@@ -316,23 +317,21 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 	}
 
-	// Until sessions land (Milestone 2), resolve runtime paths under
-	// top_dir so the application remains coherent. Milestone 2 replaces
-	// this base with the per-session directory.
-	cfg.LogDir, err = config.ResolveUnder(cfg.TopDir, cfg.LogDir)
+	sess, err := session.Create(cfg.TopDir, session.Options{
+		LogSubdir:   cfg.LogDir,
+		SpoolSubdir: cfg.ContextConfig.SpoolDir,
+		Model:       cfg.Model,
+		BaseURL:     cfg.BaseURL,
+	})
 	if err != nil {
-		fmt.Fprintf(stderr, "litegent: resolving log_dir: %v\n", err)
+		fmt.Fprintf(stderr, "litegent: creating session: %v\n", err)
 		return ExitConfigOrCLIError
 	}
-	if cfg.ContextConfig.SpoolDir != "" {
-		cfg.ContextConfig.SpoolDir, err = config.ResolveUnder(cfg.TopDir, cfg.ContextConfig.SpoolDir)
-		if err != nil {
-			fmt.Fprintf(stderr, "litegent: resolving spool_dir: %v\n", err)
-			return ExitConfigOrCLIError
-		}
-	}
+	cfg.LogDir = sess.LogDir
+	cfg.ContextConfig.SpoolDir = sess.SpoolDir
+	fmt.Fprintf(stderr, "litegent: session %s (%s)\n", sess.ID, sess.Dir)
 
-	logger, err := logging.New(cfg.LogDir, cfg.APIKey)
+	logger, err := logging.NewWithRunID(sess.LogDir, cfg.APIKey, sess.RunID)
 	if err != nil {
 		fmt.Fprintf(stderr, "litegent: initializing logger: %v\n", err)
 		return ExitConfigOrCLIError
@@ -350,8 +349,7 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	sessionID := fmt.Sprintf("session_%s", time.Now().UTC().Format("20060102T150405Z"))
-	if err := logger.LogSessionStart(sessionID, cfg.Model, cfg.BaseURL); err != nil && args.verbose {
+	if err := logger.LogSessionStart(sess.ID, cfg.Model, cfg.BaseURL); err != nil && args.verbose {
 		fmt.Fprintf(stderr, "litegent: warning: failed to write session start: %v\n", err)
 	}
 	prog.Startup(cfg.Model, cfg.BaseURL, len(registry.Schemas()), args.interactive)

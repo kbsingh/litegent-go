@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -40,33 +41,41 @@ type TraceEvent struct {
 	Data      map[string]any `json:"data"`
 }
 
-// Logger writes the dual audit log for one Litegent session.
+// Logger writes the dual audit log for one Litegent session run.
 type Logger struct {
 	mu          sync.Mutex
 	traceFile   *os.File
 	sessionFile *os.File
 	apiKey      string // redacted from every logged string; never empty-checked against ""
 
+	RunID       string
 	TracePath   string
 	SessionPath string
 }
 
-// New creates logDir if needed and opens trace_<ts>.jsonl and
-// session_<ts>.log for the given UTC timestamp tag. apiKey, if non-empty,
-// is redacted (masked) out of every value written to either file.
+// New creates logDir if needed and opens a run-scoped trace/session pair.
 func New(logDir, apiKey string) (*Logger, error) {
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
+	return NewWithRunID(logDir, apiKey, newRunID())
+}
+
+// NewWithRunID opens trace_<runID>.jsonl and session_<runID>.log. The run
+// ID is chosen by the caller so the session manifest and log filenames can
+// share one identifier.
+func NewWithRunID(logDir, apiKey, runID string) (*Logger, error) {
+	if runID == "" {
+		return nil, fmt.Errorf("run id must not be empty")
+	}
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
 		return nil, fmt.Errorf("creating log dir %q: %w", logDir, err)
 	}
-	ts := time.Now().UTC().Format("20060102_150405")
-	tracePath := filepath.Join(logDir, fmt.Sprintf("trace_%s.jsonl", ts))
-	sessionPath := filepath.Join(logDir, fmt.Sprintf("session_%s.log", ts))
+	tracePath := filepath.Join(logDir, fmt.Sprintf("trace_%s.jsonl", runID))
+	sessionPath := filepath.Join(logDir, fmt.Sprintf("session_%s.log", runID))
 
-	traceFile, err := os.OpenFile(tracePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	traceFile, err := os.OpenFile(tracePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("opening trace file: %w", err)
 	}
-	sessionFile, err := os.OpenFile(sessionPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	sessionFile, err := os.OpenFile(sessionPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		traceFile.Close()
 		return nil, fmt.Errorf("opening session file: %w", err)
@@ -76,9 +85,21 @@ func New(logDir, apiKey string) (*Logger, error) {
 		traceFile:   traceFile,
 		sessionFile: sessionFile,
 		apiKey:      apiKey,
+		RunID:       runID,
 		TracePath:   tracePath,
 		SessionPath: sessionPath,
 	}, nil
+}
+
+var logRunCounter atomic.Uint64
+
+func newRunID() string {
+	return fmt.Sprintf(
+		"%s-%d-%d",
+		time.Now().UTC().Format("20060102T150405_000000000Z"),
+		os.Getpid(),
+		logRunCounter.Add(1),
+	)
 }
 
 // Close flushes and closes both log files.
