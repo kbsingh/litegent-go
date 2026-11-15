@@ -53,10 +53,10 @@ if command -v file >/dev/null 2>&1; then
 fi
 
 if [[ "${1:-}" == "--install" ]]; then
-  PREFIX="${PREFIX:-/usr/local/bin}"
+  PREFIX="${PREFIX:-~/.local/bin}"
   echo "==> Installing to ${PREFIX}/${BINARY_NAME}"
   install -m 0755 "${OUT_DIR}/${BINARY_NAME}" "${PREFIX}/${BINARY_NAME}"
   echo "==> Installed. Run '${BINARY_NAME} --version' to verify."
 else
-  echo "==> Run with --install to also copy the binary onto your PATH (default: /usr/local/bin)."
+  echo "==> Run with --install to also copy the binary onto your PATH (default: ~/.local/bin)."
 fi
